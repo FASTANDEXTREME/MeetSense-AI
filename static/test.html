@@ -1,0 +1,304 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>MeetSense AI</title>
+    <style>
+        body { margin: 0; font-family: Arial; background: #f5f6fa; }
+
+        #joinScreen {
+            height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+        }
+
+        #joinBox {
+            background: white;
+            padding: 40px;
+            border-radius: 15px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.1);
+            text-align: center;
+            width: 350px;
+        }
+
+        input {
+            width: 100%;
+            padding: 10px;
+            margin: 10px 0;
+            border-radius: 8px;
+            border: 1px solid #ddd;
+        }
+
+        button {
+            padding: 10px 20px;
+            border-radius: 8px;
+            border: none;
+            background: #4f46e5;
+            color: white;
+            cursor: pointer;
+        }
+
+        #meetingUI { display: none; height: 100vh; }
+
+        #mainLayout { display: flex; height: 100%; }
+
+        #leftPanel { flex: 3; padding: 20px; }
+
+        #videoGrid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 10px;
+        }
+
+        video {
+            width: 100%;
+            border-radius: 10px;
+            background: black;
+        }
+
+        #rightPanel {
+            flex: 1;
+            background: white;
+            padding: 20px;
+            overflow-y: auto;
+            border-left: 1px solid #eee;
+        }
+
+        #summaryBox, #engagementBox {
+            background: #f9fafb;
+            padding: 15px;
+            border-radius: 10px;
+            margin-bottom: 20px;
+        }
+
+        #transcript {
+            height: 150px;
+            overflow-y: auto;
+            background: #f1f1f1;
+            padding: 10px;
+            border-radius: 10px;
+        }
+    </style>
+</head>
+<body>
+
+<div id="joinScreen">
+    <div id="joinBox">
+        <h2>🎥 MeetSense AI</h2>
+        <input id="roomInput" placeholder="Enter Room ID" />
+        <input id="nameInput" placeholder="Enter Your Name" />
+        <button onclick="joinMeeting()">Join Meeting</button>
+    </div>
+</div>
+
+<div id="meetingUI">
+    <div id="mainLayout">
+
+        <div id="leftPanel">
+            <h3>Video Room</h3>
+            <div id="videoGrid"></div>
+
+            <br>
+            <button onclick="startSpeaking()">Start Speaking</button>
+            <button onclick="stopSpeaking()">Stop</button>
+
+            <h3>Transcript</h3>
+            <div id="transcript"></div>
+        </div>
+
+        <div id="rightPanel">
+            <h3>🧠 Meeting Summary</h3>
+            <div id="summaryBox"></div>
+
+            <h3>👀 Engagement</h3>
+            <div id="engagementBox">0%</div>
+        </div>
+
+    </div>
+</div>
+
+<script>
+
+let roomId;
+let userName;
+let transcriptSocket;
+let signalingSocket;
+let visionSocket;
+let localStream;
+let peers = {};
+let recognition;
+let clientId = Math.random().toString(36).substring(2);
+const videoGrid = document.getElementById("videoGrid");
+
+function joinMeeting() {
+    roomId = document.getElementById("roomInput").value || "defaultRoom";
+    userName = document.getElementById("nameInput").value || "Guest";
+
+    document.getElementById("joinScreen").style.display = "none";
+    document.getElementById("meetingUI").style.display = "block";
+
+    initializeMeeting();
+}
+
+async function initializeMeeting() {
+
+    localStream = await navigator.mediaDevices.getUserMedia({
+        video: true,
+        audio: true
+    });
+
+    const localVideo = document.createElement("video");
+    localVideo.srcObject = localStream;
+    localVideo.autoplay = true;
+    localVideo.muted = true;
+    videoGrid.appendChild(localVideo);
+
+    transcriptSocket = new WebSocket(`ws://localhost:8000/ws/${roomId}`);
+
+    transcriptSocket.onmessage = (event) => {
+        const data = JSON.parse(event.data);
+
+        if (data.type === "transcript") {
+            document.getElementById("transcript").innerHTML +=
+                `<div><b>${data.speaker}:</b> ${data.text}</div>`;
+        }
+
+        if (data.type === "summary") {
+            document.getElementById("summaryBox").innerText =
+                JSON.stringify(data.data, null, 2);
+        }
+    };
+
+    signalingSocket = new WebSocket(
+        `ws://localhost:8000/ws/signal/${roomId}/${clientId}`
+    );
+
+    signalingSocket.onmessage = async (event) => {
+        const data = JSON.parse(event.data);
+
+        if (data.type === "new_peer") {
+    if (!peers[data.client_id]) {
+        createPeerConnection(data.client_id, true);
+    }
+}
+
+        if (data.type === "offer") {
+            await createPeerConnection(data.sender, false);
+            await peers[data.sender].setRemoteDescription(data.offer);
+
+            const answer = await peers[data.sender].createAnswer();
+            await peers[data.sender].setLocalDescription(answer);
+
+            signalingSocket.send(JSON.stringify({
+                type: "answer",
+                target: data.sender,
+                answer: answer
+            }));
+        }
+
+        if (data.type === "answer") {
+            await peers[data.sender].setRemoteDescription(data.answer);
+        }
+
+        if (data.type === "ice") {
+            await peers[data.sender].addIceCandidate(data.candidate);
+        }
+    };
+
+    visionSocket = new WebSocket(
+        `ws://localhost:8000/ws/vision/${roomId}/${clientId}`
+    );
+
+    setInterval(() => {
+        const canvas = document.createElement("canvas");
+        canvas.width = 250;
+        canvas.height = 180;
+        const ctx = canvas.getContext("2d");
+        ctx.drawImage(videoGrid.querySelector("video"), 0, 0, 250, 180);
+        visionSocket.send(canvas.toDataURL("image/jpeg"));
+    }, 3000);
+
+    visionSocket.onmessage = (event) => {
+    const data = JSON.parse(event.data);
+
+    document.getElementById("engagementBox").innerText =
+        data.engagement_score + "%";
+};
+
+}
+
+async function createPeerConnection(targetId, isInitiator) {
+
+    // Prevent duplicate peer creation
+    if (peers[targetId]) return;
+
+    const peer = new RTCPeerConnection({
+        iceServers: [{ urls: "stun:stun.l.google.com:19302" }]
+    });
+
+    peers[targetId] = peer;
+
+    // Add local tracks
+    localStream.getTracks().forEach(track => {
+        peer.addTrack(track, localStream);
+    });
+
+    // Create video element ONCE per peer
+    const remoteVideo = document.createElement("video");
+    remoteVideo.id = "video-" + targetId;
+    remoteVideo.autoplay = true;
+    remoteVideo.playsInline = true;
+    videoGrid.appendChild(remoteVideo);
+
+    peer.ontrack = (event) => {
+        // Attach stream only once
+        if (!remoteVideo.srcObject) {
+            remoteVideo.srcObject = event.streams[0];
+        }
+    };
+
+    peer.onicecandidate = (event) => {
+        if (event.candidate) {
+            signalingSocket.send(JSON.stringify({
+                type: "ice",
+                target: targetId,
+                candidate: event.candidate
+            }));
+        }
+    };
+
+    if (isInitiator) {
+        const offer = await peer.createOffer();
+        await peer.setLocalDescription(offer);
+
+        signalingSocket.send(JSON.stringify({
+            type: "offer",
+            target: targetId,
+            offer: offer
+        }));
+    }
+}
+
+function startSpeaking() {
+    recognition = new (window.SpeechRecognition || window.webkitSpeechRecognition)();
+    recognition.continuous = true;
+
+    recognition.onresult = function(event) {
+        const text = event.results[event.results.length - 1][0].transcript;
+
+        transcriptSocket.send(JSON.stringify({
+            speaker: userName,
+            text: text
+        }));
+    };
+
+    recognition.start();
+}
+
+function stopSpeaking() {
+    if (recognition) recognition.stop();
+}
+
+</script>
+</body>
+</html>

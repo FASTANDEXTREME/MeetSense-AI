@@ -1,0 +1,17 @@
+# Environment variables
+.env
+
+# API keys / secrets
+vision-key.json
+
+# Node modules (if frontend/backend uses it)
+node_modules/
+
+# Python virtual environment
+venv/
+
+# OS files
+.DS_Store
+
+# Logs
+*.log
