@@ -45,12 +45,17 @@ export default function useVisionAgent(roomId, clientId) {
 
   const startCamera = async () => {
     try {
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        throw new Error("getUserMedia is not supported or blocked by browser over HTTP.");
+      }
       const stream = await navigator.mediaDevices.getUserMedia({
         video: true,
       });
 
-      videoRef.current.srcObject = stream;
-      await videoRef.current.play();
+      if (videoRef.current) {
+        videoRef.current.srcObject = stream;
+        await videoRef.current.play();
+      }
 
       const canvas = document.createElement("canvas");
       const ctx = canvas.getContext("2d");

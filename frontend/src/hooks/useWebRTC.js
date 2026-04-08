@@ -14,13 +14,21 @@ export default function useWebRTC(roomId, clientId) {
 
   useEffect(() => {
     async function init() {
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        console.error("Browser blocked getUserMedia over HTTP. You must use HTTPS or localhost.");
+        alert("Camera/Mic access is blocked by your browser. Please access via localhost or HTTPS.");
+        return;
+      }
+
       const stream = await navigator.mediaDevices.getUserMedia({
         video: true,
         audio: true
       });
 
       localStreamRef.current = stream;
-      localVideoRef.current.srcObject = stream;
+      if (localVideoRef.current) {
+        localVideoRef.current.srcObject = stream;
+      }
 
       const wsHost = window.location.hostname || "localhost";
       socketRef.current = new WebSocket(
