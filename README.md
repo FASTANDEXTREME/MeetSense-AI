@@ -25,14 +25,22 @@ This repository has been fully optimized and prepared to run efficiently on a **
 
 ## 🛠️ Installation & Setup (Headless Linux VM)
 
-### 1. Clone the Repository
-SS into your Linux VM and clone the project:
+### 1. Install System Dependencies (Ubuntu/Debian)
+Update your package list and install the required OS-level packages:
 ```bash
-git clone https://github.com/yourusername/MeetSenseAI.git
+sudo apt update
+sudo apt install -y nodejs npm
+sudo apt install -y python3 python3-pip python3-venv git curl wget
+```
+
+### 2. Clone the Repository
+SSH into your Linux VM and clone the project:
+```bash
+git clone https://github.com/FASTANDEXTREME/MeetSenseAI.git
 cd MeetSenseAI
 ```
 
-### 2. Environment Configuration
+### 3. Environment Configuration
 Create a `.env` file from the supplied example:
 ```bash
 cp .env.example .env
