@@ -17,6 +17,23 @@ export default function useTranscript(roomId, name) {
   const reconnectAttemptRef = useRef(0);
   const reconnectTimerRef = useRef(null);
   const unmountedRef = useRef(false);
+  const connectRef = useRef(null);
+
+  // Store connect function in ref to break circular dependency
+  const scheduleReconnect = useCallback(() => {
+    if (reconnectAttemptRef.current >= MAX_RECONNECT_ATTEMPTS) {
+      console.warn("Max transcript WS reconnect attempts reached.");
+      return;
+    }
+
+    const delay = BASE_RECONNECT_DELAY_MS * Math.pow(2, reconnectAttemptRef.current);
+    console.log(`Reconnecting transcript WS in ${delay}ms (attempt ${reconnectAttemptRef.current + 1})...`);
+
+    reconnectTimerRef.current = setTimeout(() => {
+      reconnectAttemptRef.current += 1;
+      connectRef.current?.();
+    }, delay);
+  }, []);
 
   const connectWebSocket = useCallback(() => {
     if (unmountedRef.current) return;
@@ -70,21 +87,11 @@ export default function useTranscript(roomId, name) {
         setTalkTime(data.data);
       }
     };
-  }, [roomId]);
+  }, [roomId, scheduleReconnect]);
 
-  const scheduleReconnect = useCallback(() => {
-    if (reconnectAttemptRef.current >= MAX_RECONNECT_ATTEMPTS) {
-      console.warn("Max transcript WS reconnect attempts reached.");
-      return;
-    }
-
-    const delay = BASE_RECONNECT_DELAY_MS * Math.pow(2, reconnectAttemptRef.current);
-    console.log(`Reconnecting transcript WS in ${delay}ms (attempt ${reconnectAttemptRef.current + 1})...`);
-
-    reconnectTimerRef.current = setTimeout(() => {
-      reconnectAttemptRef.current += 1;
-      connectWebSocket();
-    }, delay);
+  // Keep connectRef in sync
+  useEffect(() => {
+    connectRef.current = connectWebSocket;
   }, [connectWebSocket]);
 
   useEffect(() => {
