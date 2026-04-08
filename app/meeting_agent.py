@@ -4,7 +4,7 @@ import logging
 from collections import OrderedDict
 
 import httpx
-from app.config import GOOGLE_API_KEY
+from app.config import OPENAI_API_KEY
 
 logger = logging.getLogger("meetsense")
 
@@ -19,7 +19,7 @@ def _cache_key(transcript: str) -> str:
     return hashlib.sha256(normalized.encode()).hexdigest()
 
 
-# ── System Instruction (sent once, Gemini caches it) ────────────────
+# ── System Instruction ──────────────────────────────────────────────
 _SYSTEM_INSTRUCTION = (
     "You are a meeting summarizer. Return ONLY valid JSON: "
     '{"speakers":{"Name":{"key_points":["max 5"],"action_items":["max 5"]}},'
@@ -29,10 +29,10 @@ _SYSTEM_INSTRUCTION = (
 
 
 async def generate_summary(transcript: str, previous_summary=None):
-    """Generate a meeting summary via Gemini, with caching and incremental context."""
+    """Generate a meeting summary via OpenAI, with caching and incremental context."""
 
-    if not GOOGLE_API_KEY:
-        return {"error": "GOOGLE_API_KEY is not configured."}
+    if not OPENAI_API_KEY:
+        return {"error": "OPENAI_API_KEY is not configured."}
 
     if not transcript or not transcript.strip():
         return {"error": "Empty transcript."}
@@ -41,7 +41,7 @@ async def generate_summary(transcript: str, previous_summary=None):
     cache_key = _cache_key(transcript)
     if cache_key in _summary_cache:
         _summary_cache.move_to_end(cache_key)
-        logger.info("Summary cache HIT — skipping Gemini API call")
+        logger.info("Summary cache HIT — skipping API call")
         return _summary_cache[cache_key]
 
     # ── Build context-aware prompt ──────────────────────────────────
@@ -51,34 +51,23 @@ async def generate_summary(transcript: str, previous_summary=None):
 
     user_prompt = f"{context}New transcript:\n{transcript}"
 
-    # ── API call — gemini-2.5-flash-lite (cheapest current model) ───
-    url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent"
+    # ── API call — OpenAI gpt-4o-mini (fast + cheap) ────────────────
+    url = "https://api.openai.com/v1/chat/completions"
 
     headers = {
         "Content-Type": "application/json",
-        "x-goog-api-key": GOOGLE_API_KEY,
+        "Authorization": f"Bearer {OPENAI_API_KEY}",
     }
 
     data = {
-        "system_instruction": {
-            "parts": [{"text": _SYSTEM_INSTRUCTION}]
-        },
-        "contents": [
-            {
-                "parts": [
-                    {"text": user_prompt}
-                ]
-            }
+        "model": "gpt-4o-mini",
+        "response_format": {"type": "json_object"},
+        "messages": [
+            {"role": "system", "content": _SYSTEM_INSTRUCTION},
+            {"role": "user", "content": user_prompt},
         ],
-        "generationConfig": {
-            "responseMimeType": "application/json"
-        },
-        "safetySettings": [
-            {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
-            {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
-            {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
-            {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
-        ]
+        "temperature": 0.3,
+        "max_tokens": 1024,
     }
 
     try:
@@ -88,18 +77,16 @@ async def generate_summary(transcript: str, previous_summary=None):
 
         if "error" in result:
             error_msg = result["error"].get("message", str(result["error"]))
-            logger.error(f"Gemini API error: {error_msg}")
-            return {"error": f"Gemini API error: {error_msg}"}
+            logger.error(f"OpenAI API error: {error_msg}")
+            return {"error": f"OpenAI API error: {error_msg}"}
 
-        if "candidates" not in result or not result["candidates"]:
-            # Check if blocked by safety filters
-            block_reason = result.get("promptFeedback", {}).get("blockReason", "unknown")
-            logger.warning(f"No candidates in Gemini response (blockReason={block_reason}): {result}")
-            return {"error": f"No candidates in Gemini response (reason: {block_reason})", "raw": result}
+        if "choices" not in result or not result["choices"]:
+            logger.warning(f"No choices in OpenAI response: {result}")
+            return {"error": "No choices in OpenAI response"}
 
-        raw_text = result["candidates"][0]["content"]["parts"][0]["text"]
+        raw_text = result["choices"][0]["message"]["content"]
 
-        # With responseMimeType=application/json, output should be clean JSON
+        # With response_format=json_object, output should be clean JSON
         cleaned_text = raw_text.strip()
         if cleaned_text.startswith("```"):
             cleaned_text = cleaned_text.replace("```json", "")
@@ -114,7 +101,7 @@ async def generate_summary(transcript: str, previous_summary=None):
             if len(_summary_cache) > _CACHE_MAX_SIZE:
                 _summary_cache.popitem(last=False)
 
-            logger.info("Gemini API call succeeded — result cached")
+            logger.info("OpenAI API call succeeded — result cached")
             return parsed
 
         except Exception as e:
@@ -125,10 +112,10 @@ async def generate_summary(transcript: str, previous_summary=None):
             }
 
     except httpx.TimeoutException:
-        return {"error": "Gemini API request timed out"}
+        return {"error": "OpenAI API request timed out"}
 
     except Exception as e:
         return {
-            "error": "Gemini API failed",
+            "error": "OpenAI API failed",
             "details": str(e)
         }
