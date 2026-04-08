@@ -86,7 +86,7 @@ export default function useWebRTC(roomId, clientId) {
     }
 
     init();
-  }, [roomId]);
+  }, [roomId, clientId]);
 
   function createPeer(targetId, initiator) {
     if (peersRef.current[targetId]) {
