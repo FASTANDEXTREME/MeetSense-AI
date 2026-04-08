@@ -51,8 +51,8 @@ async def generate_summary(transcript: str, previous_summary=None):
 
     user_prompt = f"{context}New transcript:\n{transcript}"
 
-    # ── API call — gemini-2.0-flash-lite (cheapest model) ───────────
-    url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-lite:generateContent"
+    # ── API call — gemini-2.5-flash-lite (cheapest current model) ───
+    url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent"
 
     headers = {
         "Content-Type": "application/json",
@@ -72,7 +72,13 @@ async def generate_summary(transcript: str, previous_summary=None):
         ],
         "generationConfig": {
             "responseMimeType": "application/json"
-        }
+        },
+        "safetySettings": [
+            {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
+            {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
+            {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
+            {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
+        ]
     }
 
     try:
@@ -80,9 +86,16 @@ async def generate_summary(transcript: str, previous_summary=None):
             response = await client.post(url, headers=headers, json=data)
             result = response.json()
 
-        if "candidates" not in result:
-            logger.warning(f"No candidates in Gemini response: {result}")
-            return {"error": "No candidates in Gemini response", "raw": result}
+        if "error" in result:
+            error_msg = result["error"].get("message", str(result["error"]))
+            logger.error(f"Gemini API error: {error_msg}")
+            return {"error": f"Gemini API error: {error_msg}"}
+
+        if "candidates" not in result or not result["candidates"]:
+            # Check if blocked by safety filters
+            block_reason = result.get("promptFeedback", {}).get("blockReason", "unknown")
+            logger.warning(f"No candidates in Gemini response (blockReason={block_reason}): {result}")
+            return {"error": f"No candidates in Gemini response (reason: {block_reason})", "raw": result}
 
         raw_text = result["candidates"][0]["content"]["parts"][0]["text"]
 
