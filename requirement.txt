@@ -1,0 +1,12 @@
+fastapi
+uvicorn
+python-dotenv
+requests
+numpy
+PyJWT
+bcrypt
+faiss-cpu
+sentence-transformers
+passlib
+pydantic-settings
+pymongo
