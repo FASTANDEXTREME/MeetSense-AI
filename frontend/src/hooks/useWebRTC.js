@@ -12,6 +12,12 @@ export default function useWebRTC(roomId, clientId) {
   const localStreamRef = useRef();
   const candidateQueue = useRef({});
 
+  const safeSend = (payload) => {
+    if (socketRef.current && socketRef.current.readyState === WebSocket.OPEN) {
+      socketRef.current.send(JSON.stringify(payload));
+    }
+  };
+
   useEffect(() => {
     async function init() {
       if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
@@ -54,10 +60,10 @@ export default function useWebRTC(roomId, clientId) {
           const answer = await peer.createAnswer();
           await peer.setLocalDescription(answer);
 
-          socketRef.current.send(JSON.stringify({
+          safeSend({
             answer,
             target: data.sender
-          }));
+          });
 
           flushCandidates(data.sender);
         }
@@ -94,6 +100,12 @@ export default function useWebRTC(roomId, clientId) {
     }
 
     init();
+
+    return () => {
+      if (socketRef.current) {
+        socketRef.current.close();
+      }
+    };
   }, [roomId, clientId]);
 
   function createPeer(targetId, initiator) {
@@ -116,20 +128,20 @@ export default function useWebRTC(roomId, clientId) {
 
     peer.onicecandidate = (event) => {
       if (event.candidate) {
-        socketRef.current.send(JSON.stringify({
+        safeSend({
           candidate: event.candidate,
           target: targetId
-        }));
+        });
       }
     };
 
     if (initiator) {
       peer.createOffer().then(offer => {
         peer.setLocalDescription(offer);
-        socketRef.current.send(JSON.stringify({
+        safeSend({
           offer,
           target: targetId
-        }));
+        });
       });
     }
 

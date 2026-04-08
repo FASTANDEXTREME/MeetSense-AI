@@ -10,6 +10,7 @@ export default function useTranscript(roomId, name) {
 
   const socketRef = useRef(null);
   const recognitionRef = useRef(null);
+  const isRecordingRef = useRef(false);
 
   useEffect(() => {
     const wsHost = window.location.hostname || "localhost";
@@ -82,11 +83,18 @@ export default function useTranscript(roomId, name) {
     recognitionRef.current.continuous = true;
     recognitionRef.current.interimResults = false;
 
+    isRecordingRef.current = true;
+
+    // We only send 'speaking' once when the user clicks start 
     recognitionRef.current.onstart = () => {
-      safeSend({
-        type: "speaking",
-        speaker: name
-      });
+      // already handled in startMic
+    };
+
+    recognitionRef.current.onerror = (event) => {
+      console.error("Speech Recognition Error:", event.error);
+      if (event.error === 'not-allowed') {
+        isRecordingRef.current = false;
+      }
     };
 
     recognitionRef.current.onresult = (event) => {
@@ -101,17 +109,32 @@ export default function useTranscript(roomId, name) {
     };
 
     recognitionRef.current.onend = () => {
-      safeSend({
-        type: "stopped_speaking",
-        speaker: name
-      });
+      if (isRecordingRef.current) {
+        setTimeout(() => {
+          try {
+            recognitionRef.current.start();
+          } catch (error) {
+            console.log("Could not auto-restart mic:", error);
+          }
+        }, 200); // Prevent infinite freeze loop
+      }
     };
+
+    safeSend({
+      type: "speaking",
+      speaker: name
+    });
 
     recognitionRef.current.start();
   };
 
 
   const stopMic = () => {
+    isRecordingRef.current = false;
+    safeSend({
+      type: "stopped_speaking",
+      speaker: name
+    });
     recognitionRef.current?.stop();
   };
 
