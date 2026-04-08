@@ -82,7 +82,7 @@ nohup ./run.sh > meetsense.log 2>&1 &
 sudo npm i -g pm2
 
 # Start Backend
-pm2 start "uvicorn app.main:app --host 0.0.0.0 --port 8000" --name "meetsense-backend"
+pm2 start "venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8000" --name "meetsense-backend"
 
 # Start Frontend
 cd frontend

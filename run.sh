@@ -9,6 +9,11 @@ echo "======================================"
 
 # 1. Install Backend Dependencies
 echo "--> Installing Python backend dependencies..."
+# Create a virtual environment to avoid PEP 668 externally-managed-environment error
+if [ ! -d "venv" ]; then
+    python3 -m venv venv
+fi
+source venv/bin/activate
 pip install -r requirement.txt
 
 # 2. Install Frontend Dependencies
