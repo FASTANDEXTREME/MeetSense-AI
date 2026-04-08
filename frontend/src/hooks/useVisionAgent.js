@@ -13,8 +13,9 @@ export default function useVisionAgent(roomId, clientId) {
   useEffect(() => {
     if (!roomId || !clientId) return;
 
+    const wsHost = window.location.hostname || "localhost";
     wsRef.current = new WebSocket(
-      `ws://localhost:8000/ws/vision/${roomId}/${clientId}`
+      `ws://${wsHost}:8000/ws/vision/${roomId}/${clientId}`
     );
 
     wsRef.current.onopen = () => {

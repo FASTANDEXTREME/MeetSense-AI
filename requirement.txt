@@ -10,3 +10,4 @@ sentence-transformers
 passlib
 pydantic-settings
 pymongo
+opencv-python-headless

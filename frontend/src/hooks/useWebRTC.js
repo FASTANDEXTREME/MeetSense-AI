@@ -22,8 +22,9 @@ export default function useWebRTC(roomId, clientId) {
       localStreamRef.current = stream;
       localVideoRef.current.srcObject = stream;
 
+      const wsHost = window.location.hostname || "localhost";
       socketRef.current = new WebSocket(
-        `ws://localhost:8000/ws/signal/${roomId}/${clientId}`
+        `ws://${wsHost}:8000/ws/signal/${roomId}/${clientId}`
       );
 
       socketRef.current.onmessage = async (event) => {

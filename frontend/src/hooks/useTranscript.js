@@ -12,8 +12,9 @@ export default function useTranscript(roomId, name) {
   const recognitionRef = useRef(null);
 
   useEffect(() => {
+    const wsHost = window.location.hostname || "localhost";
     socketRef.current = new WebSocket(
-      `ws://localhost:8000/ws/${roomId}`
+      `ws://${wsHost}:8000/ws/${roomId}`
     );
 
     socketRef.current.onopen = () => {
