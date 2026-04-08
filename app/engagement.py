@@ -19,7 +19,5 @@ def update_engagement(room_id: str, client_id: str, is_looking_forward: bool):
     total = user_data["total"]
     engaged = user_data["engaged"]
 
-    if total == 0:
-        return 0
-
+    # total is always >= 1 here since we just incremented it
     return round((engaged / total) * 100, 2)

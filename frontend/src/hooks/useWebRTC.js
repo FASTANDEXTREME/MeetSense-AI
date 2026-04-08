@@ -19,6 +19,8 @@ export default function useWebRTC(roomId, clientId) {
   };
 
   useEffect(() => {
+    let unmounted = false;
+
     async function init() {
       if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
         console.error("Browser blocked getUserMedia over HTTP. You must use HTTPS or localhost.");
@@ -26,14 +28,24 @@ export default function useWebRTC(roomId, clientId) {
         return;
       }
 
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: true,
-        audio: true
-      });
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: true,
+          audio: true
+        });
 
-      localStreamRef.current = stream;
-      if (localVideoRef.current) {
-        localVideoRef.current.srcObject = stream;
+        if (unmounted) {
+          stream.getTracks().forEach(t => t.stop());
+          return;
+        }
+
+        localStreamRef.current = stream;
+        if (localVideoRef.current) {
+          localVideoRef.current.srcObject = stream;
+        }
+      } catch (err) {
+        console.error("Failed to get user media:", err);
+        return;
       }
 
       const wsHost = window.location.hostname || "localhost";
@@ -102,9 +114,30 @@ export default function useWebRTC(roomId, clientId) {
     init();
 
     return () => {
+      unmounted = true;
+
+      // Close signaling socket
       if (socketRef.current) {
         socketRef.current.close();
+        socketRef.current = null;
       }
+
+      // Stop all local media tracks
+      if (localStreamRef.current) {
+        localStreamRef.current.getTracks().forEach(track => track.stop());
+        localStreamRef.current = null;
+      }
+
+      // Close all peer connections
+      Object.values(peersRef.current).forEach(peer => {
+        try { peer.close(); } catch (e) { /* ignore */ }
+      });
+      peersRef.current = {};
+
+      // Clear candidate queue
+      candidateQueue.current = {};
+
+      setRemoteStreams([]);
     };
   }, [roomId, clientId]);
 
@@ -115,9 +148,11 @@ export default function useWebRTC(roomId, clientId) {
 
     const peer = new RTCPeerConnection(config);
 
-    localStreamRef.current.getTracks().forEach(track => {
-      peer.addTrack(track, localStreamRef.current);
-    });
+    if (localStreamRef.current) {
+      localStreamRef.current.getTracks().forEach(track => {
+        peer.addTrack(track, localStreamRef.current);
+      });
+    }
 
     peer.ontrack = (event) => {
       setRemoteStreams(prev => {

@@ -1,14 +1,11 @@
 import json
-import os
-import requests
-from dotenv import load_dotenv
-
-load_dotenv()
-
-API_KEY = os.getenv("GOOGLE_API_KEY")
+import httpx
+from app.config import GOOGLE_API_KEY
 
 
 async def generate_summary(transcript: str):
+    if not GOOGLE_API_KEY:
+        return {"error": "GOOGLE_API_KEY is not configured."}
 
     prompt = f"""
 You are an AI meeting assistant.
@@ -39,10 +36,11 @@ Rules:
 - Return only pure JSON.
 """
 
-    url = f"https://generativelanguage.googleapis.com/v1/models/gemini-2.5-flash:generateContent?key={API_KEY}"
+    url = "https://generativelanguage.googleapis.com/v1/models/gemini-2.5-flash:generateContent"
 
     headers = {
-        "Content-Type": "application/json"
+        "Content-Type": "application/json",
+        "x-goog-api-key": GOOGLE_API_KEY,
     }
 
     data = {
@@ -56,11 +54,12 @@ Rules:
     }
 
     try:
-        response = requests.post(url, headers=headers, json=data)
-        result = response.json()
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.post(url, headers=headers, json=data)
+            result = response.json()
 
         if "candidates" not in result:
-            return result
+            return {"error": "No candidates in Gemini response", "raw": result}
 
         raw_text = result["candidates"][0]["content"]["parts"][0]["text"]
 
@@ -81,6 +80,9 @@ Rules:
                 "raw": raw_text,
                 "parse_error": str(e)
             }
+
+    except httpx.TimeoutException:
+        return {"error": "Gemini API request timed out"}
 
     except Exception as e:
         return {

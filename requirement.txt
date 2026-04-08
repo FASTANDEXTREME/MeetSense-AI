@@ -1,7 +1,7 @@
 fastapi
 uvicorn
 python-dotenv
-requests
+httpx
 numpy
 PyJWT
 bcrypt

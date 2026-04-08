@@ -1,4 +1,5 @@
 import json
+import logging
 import time
 from collections import defaultdict
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
@@ -6,6 +7,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.meeting_agent import generate_summary
 from app.vision_sdk import VisionAgent
 from app.engagement import update_engagement
+
+logger = logging.getLogger("meetsense")
 
 app = FastAPI()
 
@@ -23,9 +26,38 @@ rooms_transcripts = defaultdict(list)
 rooms_connections = defaultdict(list)
 rooms_signaling = defaultdict(dict)
 
-# 🔥 NEW — speaking analytics storage
+# Speaking analytics storage
 rooms_speaking_time = defaultdict(lambda: defaultdict(float))
 rooms_speaking_start = defaultdict(dict)
+
+
+async def safe_broadcast(room_id: str, payload: dict, exclude: WebSocket = None):
+    """Broadcast to all connections in a room, removing dead ones."""
+    dead_connections = []
+    for conn in rooms_connections[room_id]:
+        if conn is exclude:
+            continue
+        try:
+            await conn.send_json(payload)
+        except Exception:
+            dead_connections.append(conn)
+
+    for conn in dead_connections:
+        try:
+            rooms_connections[room_id].remove(conn)
+        except ValueError:
+            pass
+
+
+def cleanup_room(room_id: str):
+    """Remove all room data structures when the last connection leaves."""
+    if not rooms_connections.get(room_id):
+        rooms_transcripts.pop(room_id, None)
+        rooms_connections.pop(room_id, None)
+        rooms_signaling.pop(room_id, None)
+        rooms_speaking_time.pop(room_id, None)
+        rooms_speaking_start.pop(room_id, None)
+        logger.info(f"Room '{room_id}' cleaned up (no connections left).")
 
 
 # ================= TRANSCRIPT + SUMMARY =================
@@ -41,19 +73,23 @@ async def websocket_transcript(websocket: WebSocket, room_id: str):
 
             # ================= SPEAKING START =================
             if data.get("type") == "speaking":
-                speaker = data["speaker"]
+                speaker = data.get("speaker")
+                if not speaker:
+                    continue
+
                 rooms_speaking_start[room_id][speaker] = time.time()
 
-                for conn in rooms_connections[room_id]:
-                    await conn.send_json({
-                        "type": "speaking",
-                        "speaker": speaker
-                    })
+                await safe_broadcast(room_id, {
+                    "type": "speaking",
+                    "speaker": speaker
+                })
                 continue
 
             # ================= SPEAKING STOP =================
             if data.get("type") == "stopped_speaking":
-                speaker = data["speaker"]
+                speaker = data.get("speaker")
+                if not speaker:
+                    continue
 
                 start_time = rooms_speaking_start[room_id].get(speaker)
                 if start_time:
@@ -61,50 +97,58 @@ async def websocket_transcript(websocket: WebSocket, room_id: str):
                     rooms_speaking_time[room_id][speaker] += duration
                     rooms_speaking_start[room_id][speaker] = None
 
-                # Broadcast updated talk-time
-                for conn in rooms_connections[room_id]:
-                    await conn.send_json({
-                        "type": "talk_time",
-                        "data": rooms_speaking_time[room_id]
-                    })
+                # B2 fix: convert defaultdict to plain dict for JSON serialization
+                await safe_broadcast(room_id, {
+                    "type": "talk_time",
+                    "data": dict(rooms_speaking_time[room_id])
+                })
 
-                # Remove glow
-                for conn in rooms_connections[room_id]:
-                    await conn.send_json({
-                        "type": "stopped_speaking",
-                        "speaker": speaker
-                    })
-
+                await safe_broadcast(room_id, {
+                    "type": "stopped_speaking",
+                    "speaker": speaker
+                })
                 continue
 
             # ================= NORMAL TRANSCRIPT =================
-            speaker = data["speaker"]
-            text = data["text"]
+            speaker = data.get("speaker")
+            text = data.get("text")
+
+            if not speaker or not text:
+                continue
 
             rooms_transcripts[room_id].append(f"{speaker}: {text}")
 
-            for conn in rooms_connections[room_id]:
-                await conn.send_json({
-                    "type": "transcript",
-                    "speaker": speaker,
-                    "text": text
-                })
+            await safe_broadcast(room_id, {
+                "type": "transcript",
+                "speaker": speaker,
+                "text": text
+            })
 
             # Auto summary every 5 lines
             if len(rooms_transcripts[room_id]) >= 5:
                 transcript = " ".join(rooms_transcripts[room_id])
                 summary = await generate_summary(transcript)
 
-                for conn in rooms_connections[room_id]:
-                    await conn.send_json({
-                        "type": "summary",
-                        "data": summary
-                    })
+                await safe_broadcast(room_id, {
+                    "type": "summary",
+                    "data": summary
+                })
 
                 rooms_transcripts[room_id] = []
 
     except WebSocketDisconnect:
-        rooms_connections[room_id].remove(websocket)
+        try:
+            rooms_connections[room_id].remove(websocket)
+        except ValueError:
+            pass
+        cleanup_room(room_id)
+    except Exception as e:
+        logger.error(f"Transcript WS error: {e}")
+        try:
+            rooms_connections[room_id].remove(websocket)
+        except ValueError:
+            pass
+        cleanup_room(room_id)
 
 
 # ================= VISION =================
@@ -117,7 +161,8 @@ async def websocket_vision(websocket: WebSocket, room_id: str, client_id: str):
         while True:
             image_data = await websocket.receive_text()
 
-            vision_result = vision_agent.analyze(image_data)
+            # B1 fix: method is 'detect', not 'analyze'
+            vision_result = vision_agent.detect(image_data)
 
             engagement_score = update_engagement(
                 room_id,
@@ -134,6 +179,8 @@ async def websocket_vision(websocket: WebSocket, room_id: str, client_id: str):
 
     except WebSocketDisconnect:
         pass
+    except Exception as e:
+        logger.error(f"Vision WS error for {client_id}: {e}")
 
 
 # ================= WEBRTC SIGNALING =================
@@ -143,21 +190,30 @@ async def signaling(websocket: WebSocket, room_id: str, client_id: str):
     await websocket.accept()
     rooms_signaling[room_id][client_id] = websocket
 
-    for cid, conn in rooms_signaling[room_id].items():
+    for cid, conn in list(rooms_signaling[room_id].items()):
         if cid != client_id:
-            await conn.send_json({
-                "type": "new_peer",
-                "client_id": client_id
-            })
+            try:
+                await conn.send_json({
+                    "type": "new_peer",
+                    "client_id": client_id
+                })
+            except Exception:
+                rooms_signaling[room_id].pop(cid, None)
 
     try:
         while True:
             data = await websocket.receive_json()
             target = data.get("target")
 
-            if target in rooms_signaling[room_id]:
+            if target and target in rooms_signaling[room_id]:
                 data["sender"] = client_id
-                await rooms_signaling[room_id][target].send_json(data)
+                try:
+                    await rooms_signaling[room_id][target].send_json(data)
+                except Exception:
+                    rooms_signaling[room_id].pop(target, None)
 
     except WebSocketDisconnect:
-            rooms_signaling[room_id].pop(client_id, None)
+        rooms_signaling[room_id].pop(client_id, None)
+    except Exception as e:
+        logger.error(f"Signaling WS error for {client_id}: {e}")
+        rooms_signaling[room_id].pop(client_id, None)

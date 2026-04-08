@@ -1,4 +1,7 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, useCallback } from "react";
+
+const MAX_RECONNECT_ATTEMPTS = 10;
+const BASE_RECONNECT_DELAY_MS = 1000;
 
 export default function useTranscript(roomId, name) {
 
@@ -11,24 +14,41 @@ export default function useTranscript(roomId, name) {
   const socketRef = useRef(null);
   const recognitionRef = useRef(null);
   const isRecordingRef = useRef(false);
+  const reconnectAttemptRef = useRef(0);
+  const reconnectTimerRef = useRef(null);
+  const unmountedRef = useRef(false);
 
-  useEffect(() => {
+  const connectWebSocket = useCallback(() => {
+    if (unmountedRef.current) return;
+
     const wsHost = window.location.hostname || "localhost";
-    socketRef.current = new WebSocket(
-      `ws://${wsHost}:8000/ws/${roomId}`
-    );
+    const ws = new WebSocket(`ws://${wsHost}:8000/ws/${roomId}`);
+    socketRef.current = ws;
 
-    socketRef.current.onopen = () => {
-      console.log("WebSocket Connected");
+    ws.onopen = () => {
+      console.log("Transcript WebSocket connected");
       setSocketReady(true);
+      reconnectAttemptRef.current = 0;
     };
 
-    socketRef.current.onclose = () => {
+    ws.onclose = () => {
       setSocketReady(false);
+      if (!unmountedRef.current) {
+        scheduleReconnect();
+      }
     };
 
-    socketRef.current.onmessage = (event) => {
-      const data = JSON.parse(event.data);
+    ws.onerror = (err) => {
+      console.error("Transcript WebSocket error:", err);
+    };
+
+    ws.onmessage = (event) => {
+      let data;
+      try {
+        data = JSON.parse(event.data);
+      } catch {
+        return;
+      }
 
       if (data.type === "transcript") {
         setTranscript(prev => [...prev, data]);
@@ -50,15 +70,36 @@ export default function useTranscript(roomId, name) {
         setTalkTime(data.data);
       }
     };
-
-    return () => {
-      socketRef.current?.close();
-    };
-
   }, [roomId]);
 
+  const scheduleReconnect = useCallback(() => {
+    if (reconnectAttemptRef.current >= MAX_RECONNECT_ATTEMPTS) {
+      console.warn("Max transcript WS reconnect attempts reached.");
+      return;
+    }
 
-  // 🔥 SAFE SEND FUNCTION
+    const delay = BASE_RECONNECT_DELAY_MS * Math.pow(2, reconnectAttemptRef.current);
+    console.log(`Reconnecting transcript WS in ${delay}ms (attempt ${reconnectAttemptRef.current + 1})...`);
+
+    reconnectTimerRef.current = setTimeout(() => {
+      reconnectAttemptRef.current += 1;
+      connectWebSocket();
+    }, delay);
+  }, [connectWebSocket]);
+
+  useEffect(() => {
+    unmountedRef.current = false;
+    connectWebSocket();
+
+    return () => {
+      unmountedRef.current = true;
+      clearTimeout(reconnectTimerRef.current);
+      socketRef.current?.close();
+    };
+  }, [connectWebSocket]);
+
+
+  // Safe send function
   const safeSend = (payload) => {
     if (
       socketRef.current &&
@@ -76,8 +117,17 @@ export default function useTranscript(roomId, name) {
       return;
     }
 
+    if (isRecordingRef.current) {
+      return; // Already recording
+    }
+
     const SpeechRecognition =
       window.SpeechRecognition || window.webkitSpeechRecognition;
+
+    if (!SpeechRecognition) {
+      alert("Speech Recognition is not supported by your browser.");
+      return;
+    }
 
     recognitionRef.current = new SpeechRecognition();
     recognitionRef.current.continuous = true;
@@ -85,14 +135,9 @@ export default function useTranscript(roomId, name) {
 
     isRecordingRef.current = true;
 
-    // We only send 'speaking' once when the user clicks start 
-    recognitionRef.current.onstart = () => {
-      // already handled in startMic
-    };
-
     recognitionRef.current.onerror = (event) => {
       console.error("Speech Recognition Error:", event.error);
-      if (event.error === 'not-allowed') {
+      if (event.error === 'not-allowed' || event.error === 'service-not-allowed') {
         isRecordingRef.current = false;
       }
     };
@@ -112,11 +157,11 @@ export default function useTranscript(roomId, name) {
       if (isRecordingRef.current) {
         setTimeout(() => {
           try {
-            recognitionRef.current.start();
+            recognitionRef.current?.start();
           } catch (error) {
             console.log("Could not auto-restart mic:", error);
           }
-        }, 200); // Prevent infinite freeze loop
+        }, 200);
       }
     };
 
@@ -136,6 +181,7 @@ export default function useTranscript(roomId, name) {
       speaker: name
     });
     recognitionRef.current?.stop();
+    recognitionRef.current = null;
   };
 
   return {

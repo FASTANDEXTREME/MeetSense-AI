@@ -9,6 +9,7 @@ export default function useVisionAgent(roomId, clientId) {
   const wsRef = useRef(null);
   const videoRef = useRef(null);
   const intervalRef = useRef(null);
+  const cameraActiveRef = useRef(false);
 
   useEffect(() => {
     if (!roomId || !clientId) return;
@@ -29,7 +30,12 @@ export default function useVisionAgent(roomId, clientId) {
     };
 
     wsRef.current.onmessage = (event) => {
-      const data = JSON.parse(event.data);
+      let data;
+      try {
+        data = JSON.parse(event.data);
+      } catch {
+        return;
+      }
 
       if (data.type === "vision") {
         setEngagement(data.engagement_score);
@@ -39,11 +45,20 @@ export default function useVisionAgent(roomId, clientId) {
     };
 
     return () => {
-      if (wsRef.current) wsRef.current.close();
+      if (wsRef.current) {
+        wsRef.current.close();
+        wsRef.current = null;
+      }
     };
   }, [roomId, clientId]);
 
   const startCamera = async () => {
+    // Guard against duplicate calls
+    if (cameraActiveRef.current) {
+      console.log("Camera already active.");
+      return;
+    }
+
     try {
       if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
         throw new Error("getUserMedia is not supported or blocked by browser over HTTP.");
@@ -51,6 +66,8 @@ export default function useVisionAgent(roomId, clientId) {
       const stream = await navigator.mediaDevices.getUserMedia({
         video: true,
       });
+
+      cameraActiveRef.current = true;
 
       if (videoRef.current) {
         videoRef.current.srcObject = stream;
@@ -66,6 +83,8 @@ export default function useVisionAgent(roomId, clientId) {
         canvas.width = videoRef.current.videoWidth;
         canvas.height = videoRef.current.videoHeight;
 
+        if (canvas.width === 0 || canvas.height === 0) return;
+
         ctx.drawImage(videoRef.current, 0, 0);
 
         const imageData = canvas.toDataURL("image/jpeg");
@@ -73,19 +92,26 @@ export default function useVisionAgent(roomId, clientId) {
         if (wsRef.current.readyState === WebSocket.OPEN) {
           wsRef.current.send(imageData);
         }
-      }, 1000); // send frame every 1 second
+      }, 1000);
     } catch (error) {
       console.error("Camera error:", error);
+      cameraActiveRef.current = false;
     }
   };
 
   const stopCamera = () => {
-    if (intervalRef.current) clearInterval(intervalRef.current);
+    cameraActiveRef.current = false;
+
+    if (intervalRef.current) {
+      clearInterval(intervalRef.current);
+      intervalRef.current = null;
+    }
 
     if (videoRef.current && videoRef.current.srcObject) {
       videoRef.current.srcObject
         .getTracks()
         .forEach((track) => track.stop());
+      videoRef.current.srcObject = null;
     }
   };
 

@@ -1,10 +1,14 @@
-import React from "react";
+import React, { useMemo } from "react";
 import useWebRTC from "../hooks/useWebRTC";
 import useTranscript from "../hooks/useTranscript";
 
 export default function MeetingRoom({ roomId, name }) {
 
-  const clientId = Math.random().toString(36).substring(2);
+  // F1 fix: stable clientId across re-renders
+  const clientId = useMemo(
+    () => Math.random().toString(36).substring(2),
+    []
+  );
 
   const { localVideoRef, remoteStreams } =
     useWebRTC(roomId, clientId);
@@ -28,7 +32,7 @@ export default function MeetingRoom({ roomId, name }) {
     }}>
 
       {/* LEFT SIDE */}
-      <div style={{ flex: 3, padding: "20px" }}>
+      <div style={{ flex: 3, padding: "20px", overflowY: "auto" }}>
 
         <h2>🎥 MeetSense AI Room: {roomId}</h2>
 
@@ -44,6 +48,7 @@ export default function MeetingRoom({ roomId, name }) {
             ref={localVideoRef}
             autoPlay
             muted
+            playsInline
             style={{
               width: "250px",
               borderRadius: "15px",
@@ -60,11 +65,13 @@ export default function MeetingRoom({ roomId, name }) {
 
           {remoteStreams.map((stream, i) => (
             <video
-              key={i}
+              key={stream.id || i}
               autoPlay
               playsInline
               ref={(video) => {
-                if (video) video.srcObject = stream;
+                if (video && video.srcObject !== stream) {
+                  video.srcObject = stream;
+                }
               }}
               style={{
                 width: "250px",
@@ -85,7 +92,8 @@ export default function MeetingRoom({ roomId, name }) {
               border: "none",
               borderRadius: "8px",
               color: "white",
-              fontWeight: "bold"
+              fontWeight: "bold",
+              cursor: "pointer"
             }}>
             🎤 Start Speaking
           </button>
@@ -97,7 +105,8 @@ export default function MeetingRoom({ roomId, name }) {
               border: "none",
               borderRadius: "8px",
               color: "white",
-              fontWeight: "bold"
+              fontWeight: "bold",
+              cursor: "pointer"
             }}>
             ⛔ Stop
           </button>
@@ -157,7 +166,7 @@ export default function MeetingRoom({ roomId, name }) {
 
         {!summary && <p>No summary yet...</p>}
 
-        {summary && (
+        {summary && !summary.error && (
           <>
             <h3>👥 Speakers</h3>
             {summary.speakers &&
@@ -170,21 +179,24 @@ export default function MeetingRoom({ roomId, name }) {
                     borderRadius: "8px"
                   }}>
                   <strong>{speakerName}</strong>
+
+                  <h4 style={{ margin: "8px 0 4px", fontSize: "14px" }}>Key Points</h4>
                   <ul>
-                    {data.key_points.map((point, i) => (
+                    {data.key_points?.map((point, i) => (
                       <li key={i}>{point}</li>
+                    ))}
+                  </ul>
+
+                  {/* F6 fix: action_items live per-speaker, not top-level */}
+                  <h4 style={{ margin: "8px 0 4px", fontSize: "14px" }}>Action Items</h4>
+                  <ul>
+                    {data.action_items?.map((item, i) => (
+                      <li key={i}>{item}</li>
                     ))}
                   </ul>
                 </div>
               ))
             }
-
-            <h3>✅ Action Items</h3>
-            <ul>
-              {summary.action_items?.map((item, i) => (
-                <li key={i}>{item}</li>
-              ))}
-            </ul>
 
             <h3>📌 Decisions</h3>
             <ul>
@@ -196,6 +208,12 @@ export default function MeetingRoom({ roomId, name }) {
             <h3>😊 Sentiment</h3>
             <p>{summary.sentiment}</p>
           </>
+        )}
+
+        {summary && summary.error && (
+          <p style={{ color: "#ef4444" }}>
+            Summary error: {summary.error}
+          </p>
         )}
       </div>
     </div>
