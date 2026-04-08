@@ -36,7 +36,7 @@ sudo apt install -y python3 python3-pip python3-venv git curl wget
 ### 2. Clone the Repository
 SSH into your Linux VM and clone the project:
 ```bash
-git clone https://github.com/FASTANDEXTREME/MeetSenseAI.git
+git clone https://github.com/FASTANDEXTREME/MeetSense-AI.git
 cd MeetSenseAI
 ```
 
