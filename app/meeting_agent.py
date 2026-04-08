@@ -1,42 +1,58 @@
 import json
+import hashlib
+import logging
+from collections import OrderedDict
+
 import httpx
 from app.config import GOOGLE_API_KEY
 
+logger = logging.getLogger("meetsense")
 
-async def generate_summary(transcript: str):
+# ── LRU Response Cache ──────────────────────────────────────────────
+_summary_cache = OrderedDict()
+_CACHE_MAX_SIZE = 50
+
+
+def _cache_key(transcript: str) -> str:
+    """Normalize whitespace/case and hash for near-duplicate detection."""
+    normalized = " ".join(transcript.lower().split())
+    return hashlib.sha256(normalized.encode()).hexdigest()
+
+
+# ── System Instruction (sent once, Gemini caches it) ────────────────
+_SYSTEM_INSTRUCTION = (
+    "You are a meeting summarizer. Return ONLY valid JSON: "
+    '{"speakers":{"Name":{"key_points":["max 5"],"action_items":["max 5"]}},'
+    '"decisions":["..."],"sentiment":"positive|neutral|negative"}. '
+    "Separate analysis per speaker. No markdown, no explanation."
+)
+
+
+async def generate_summary(transcript: str, previous_summary=None):
+    """Generate a meeting summary via Gemini, with caching and incremental context."""
+
     if not GOOGLE_API_KEY:
         return {"error": "GOOGLE_API_KEY is not configured."}
 
-    prompt = f"""
-You are an AI meeting assistant.
+    if not transcript or not transcript.strip():
+        return {"error": "Empty transcript."}
 
-Here is the meeting transcript:
+    # ── Cache lookup ────────────────────────────────────────────────
+    cache_key = _cache_key(transcript)
+    if cache_key in _summary_cache:
+        _summary_cache.move_to_end(cache_key)
+        logger.info("Summary cache HIT — skipping Gemini API call")
+        return _summary_cache[cache_key]
 
-{transcript}
+    # ── Build context-aware prompt ──────────────────────────────────
+    context = ""
+    if previous_summary and isinstance(previous_summary, dict) and "error" not in previous_summary:
+        context = f"Previous summary (update/merge, don't repeat):\n{json.dumps(previous_summary)}\n\n"
 
-Return ONLY valid JSON in this exact format:
+    user_prompt = f"{context}New transcript:\n{transcript}"
 
-{{
-  "speakers": {{
-    "Speaker Name": {{
-      "key_points": ["max 5 points"],
-      "action_items": ["max 5 actions"]
-    }}
-  }},
-  "decisions": ["decision1"],
-  "sentiment": "positive | neutral | negative"
-}}
-
-Rules:
-- Separate analysis per speaker.
-- Maximum 5 key points per speaker.
-- Maximum 5 action items per speaker.
-- Do not include explanations.
-- Do NOT wrap the JSON in markdown.
-- Return only pure JSON.
-"""
-
-    url = "https://generativelanguage.googleapis.com/v1/models/gemini-2.5-flash:generateContent"
+    # ── API call — gemini-2.0-flash-lite (cheapest model) ───────────
+    url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-lite:generateContent"
 
     headers = {
         "Content-Type": "application/json",
@@ -44,13 +60,19 @@ Rules:
     }
 
     data = {
+        "system_instruction": {
+            "parts": [{"text": _SYSTEM_INSTRUCTION}]
+        },
         "contents": [
             {
                 "parts": [
-                    {"text": prompt}
+                    {"text": user_prompt}
                 ]
             }
-        ]
+        ],
+        "generationConfig": {
+            "responseMimeType": "application/json"
+        }
     }
 
     try:
@@ -59,20 +81,28 @@ Rules:
             result = response.json()
 
         if "candidates" not in result:
+            logger.warning(f"No candidates in Gemini response: {result}")
             return {"error": "No candidates in Gemini response", "raw": result}
 
         raw_text = result["candidates"][0]["content"]["parts"][0]["text"]
 
-        # Remove markdown formatting if present
+        # With responseMimeType=application/json, output should be clean JSON
         cleaned_text = raw_text.strip()
-
         if cleaned_text.startswith("```"):
             cleaned_text = cleaned_text.replace("```json", "")
             cleaned_text = cleaned_text.replace("```", "")
             cleaned_text = cleaned_text.strip()
 
         try:
-            return json.loads(cleaned_text)
+            parsed = json.loads(cleaned_text)
+
+            # ── Store in cache ──────────────────────────────────────
+            _summary_cache[cache_key] = parsed
+            if len(_summary_cache) > _CACHE_MAX_SIZE:
+                _summary_cache.popitem(last=False)
+
+            logger.info("Gemini API call succeeded — result cached")
+            return parsed
 
         except Exception as e:
             return {

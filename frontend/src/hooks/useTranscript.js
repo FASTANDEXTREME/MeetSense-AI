@@ -18,6 +18,8 @@ export default function useTranscript(roomId, name) {
   const reconnectTimerRef = useRef(null);
   const unmountedRef = useRef(false);
   const connectRef = useRef(null);
+  const networkErrorCountRef = useRef(0);
+  const MAX_NETWORK_ERRORS = 5;
 
   // Store connect function in ref to break circular dependency
   const scheduleReconnect = useCallback(() => {
@@ -35,58 +37,66 @@ export default function useTranscript(roomId, name) {
     }, delay);
   }, []);
 
+  const connectDelayRef = useRef(null);
+
   const connectWebSocket = useCallback(() => {
     if (unmountedRef.current) return;
 
-    const wsHost = window.location.hostname || "localhost";
-    const ws = new WebSocket(`ws://${wsHost}:8000/ws/${roomId}`);
-    socketRef.current = ws;
+    // Delay connection slightly so React Strict Mode's immediate
+    // unmount can cancel the timer before the socket is ever created.
+    connectDelayRef.current = setTimeout(() => {
+      if (unmountedRef.current) return;
 
-    ws.onopen = () => {
-      console.log("Transcript WebSocket connected");
-      setSocketReady(true);
-      reconnectAttemptRef.current = 0;
-    };
+      const wsHost = window.location.hostname || "localhost";
+      const ws = new WebSocket(`ws://${wsHost}:8000/ws/${roomId}`);
+      socketRef.current = ws;
 
-    ws.onclose = () => {
-      setSocketReady(false);
-      if (!unmountedRef.current) {
-        scheduleReconnect();
-      }
-    };
+      ws.onopen = () => {
+        console.log("Transcript WebSocket connected");
+        setSocketReady(true);
+        reconnectAttemptRef.current = 0;
+      };
 
-    ws.onerror = (err) => {
-      console.error("Transcript WebSocket error:", err);
-    };
+      ws.onclose = () => {
+        setSocketReady(false);
+        if (!unmountedRef.current) {
+          scheduleReconnect();
+        }
+      };
 
-    ws.onmessage = (event) => {
-      let data;
-      try {
-        data = JSON.parse(event.data);
-      } catch {
-        return;
-      }
+      ws.onerror = (err) => {
+        console.error("Transcript WebSocket error:", err);
+      };
 
-      if (data.type === "transcript") {
-        setTranscript(prev => [...prev, data]);
-      }
+      ws.onmessage = (event) => {
+        let data;
+        try {
+          data = JSON.parse(event.data);
+        } catch {
+          return;
+        }
 
-      if (data.type === "summary") {
-        setSummary(data.data);
-      }
+        if (data.type === "transcript") {
+          setTranscript(prev => [...prev, data]);
+        }
 
-      if (data.type === "speaking") {
-        setActiveSpeaker(data.speaker);
-      }
+        if (data.type === "summary") {
+          setSummary(data.data);
+        }
 
-      if (data.type === "stopped_speaking") {
-        setActiveSpeaker(null);
-      }
+        if (data.type === "speaking") {
+          setActiveSpeaker(data.speaker);
+        }
 
-      if (data.type === "talk_time") {
-        setTalkTime(data.data);
-      }
-    };
+        if (data.type === "stopped_speaking") {
+          setActiveSpeaker(null);
+        }
+
+        if (data.type === "talk_time") {
+          setTalkTime(data.data);
+        }
+      };
+    }, 100);
   }, [roomId, scheduleReconnect]);
 
   // Keep connectRef in sync
@@ -100,6 +110,7 @@ export default function useTranscript(roomId, name) {
 
     return () => {
       unmountedRef.current = true;
+      clearTimeout(connectDelayRef.current);
       clearTimeout(reconnectTimerRef.current);
       socketRef.current?.close();
     };
@@ -141,18 +152,36 @@ export default function useTranscript(roomId, name) {
     recognitionRef.current.interimResults = false;
 
     isRecordingRef.current = true;
+    networkErrorCountRef.current = 0;
 
     recognitionRef.current.onerror = (event) => {
-      console.error("Speech Recognition Error:", event.error);
       if (event.error === 'not-allowed' || event.error === 'service-not-allowed') {
+        console.error("Speech Recognition Error:", event.error);
         isRecordingRef.current = false;
+        return;
       }
+
+      if (event.error === 'network') {
+        networkErrorCountRef.current += 1;
+        if (networkErrorCountRef.current >= MAX_NETWORK_ERRORS) {
+          console.warn(`Speech recognition stopped after ${MAX_NETWORK_ERRORS} consecutive network errors. Check your internet connection.`);
+          isRecordingRef.current = false;
+          alert("Speech recognition lost connection to the server. Please check your internet and try again.");
+          return;
+        }
+        console.warn(`Speech recognition network error (${networkErrorCountRef.current}/${MAX_NETWORK_ERRORS})`);
+        return;
+      }
+
+      console.error("Speech Recognition Error:", event.error);
     };
 
     recognitionRef.current.onresult = (event) => {
       const result = event.results[event.results.length - 1];
 
       if (result.isFinal) {
+        // Reset network error count on successful recognition
+        networkErrorCountRef.current = 0;
         safeSend({
           speaker: name,
           text: result[0].transcript
@@ -162,13 +191,15 @@ export default function useTranscript(roomId, name) {
 
     recognitionRef.current.onend = () => {
       if (isRecordingRef.current) {
+        // Exponential backoff: 200ms, 400ms, 800ms, 1600ms, 3200ms
+        const delay = 200 * Math.pow(2, networkErrorCountRef.current);
         setTimeout(() => {
           try {
             recognitionRef.current?.start();
           } catch (error) {
             console.log("Could not auto-restart mic:", error);
           }
-        }, 200);
+        }, delay);
       }
     };
 
@@ -191,11 +222,16 @@ export default function useTranscript(roomId, name) {
     recognitionRef.current = null;
   };
 
+  const requestSummary = () => {
+    safeSend({ type: "request_summary" });
+  };
+
   return {
     transcript,
     summary,
     startMic,
     stopMic,
+    requestSummary,
     activeSpeaker,
     talkTime,
     socketReady

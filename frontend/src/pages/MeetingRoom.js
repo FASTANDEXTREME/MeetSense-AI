@@ -18,6 +18,7 @@ export default function MeetingRoom({ roomId, name }) {
     summary,
     startMic,
     stopMic,
+    requestSummary,
     activeSpeaker,
     talkTime
   } = useTranscript(roomId, name);
@@ -109,6 +110,21 @@ export default function MeetingRoom({ roomId, name }) {
               cursor: "pointer"
             }}>
             ⛔ Stop
+          </button>
+
+          <button onClick={requestSummary}
+            style={{
+              padding: "10px 20px",
+              marginLeft: "10px",
+              background: "linear-gradient(135deg, #667eea, #764ba2)",
+              border: "2px solid rgba(255,255,255,0.3)",
+              borderRadius: "8px",
+              color: "white",
+              fontWeight: "bold",
+              cursor: "pointer",
+              boxShadow: "0 2px 10px rgba(102,126,234,0.4)"
+            }}>
+            📊 Generate Summary
           </button>
         </div>
 
