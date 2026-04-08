@@ -28,8 +28,8 @@ This repository has been fully optimized and prepared to run efficiently on a **
 ### 1. Clone the Repository
 SS into your Linux VM and clone the project:
 ```bash
-git clone https://github.com/yourusername/MeetSenseAI.git
-cd MeetSenseAI
+git clone https://github.com/FASTANDEXTREME/MeetSenseAI.git
+cd MeetSense-AI
 ```
 
 ### 2. Environment Configuration
