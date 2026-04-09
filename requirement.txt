@@ -12,3 +12,4 @@ pydantic-settings
 pymongo
 opencv-python-headless
 websockets
+groq

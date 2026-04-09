@@ -3,10 +3,14 @@ import hashlib
 import logging
 from collections import OrderedDict
 
-import httpx
-from app.config import GOOGLE_API_KEY
+from groq import AsyncGroq
+from app.config import GROQ_API_KEY
 
 logger = logging.getLogger("meetsense")
+
+# ── Groq Client Configuration ───────────────────────────────────────
+client = AsyncGroq(api_key=GROQ_API_KEY)
+_MODEL_NAME = "llama-3.3-70b-versatile"
 
 # ── LRU Response Cache ──────────────────────────────────────────────
 _summary_cache = OrderedDict()
@@ -29,10 +33,10 @@ _SYSTEM_INSTRUCTION = (
 
 
 async def generate_summary(transcript: str, previous_summary=None):
-    """Generate a meeting summary via Gemini, with caching and incremental context."""
+    """Generate a meeting summary via Groq, with caching and incremental context."""
 
-    if not GOOGLE_API_KEY:
-        return {"error": "GOOGLE_API_KEY is not configured."}
+    if not GROQ_API_KEY:
+        return {"error": "GROQ_API_KEY is not configured."}
 
     if not transcript or not transcript.strip():
         return {"error": "Empty transcript."}
@@ -41,7 +45,7 @@ async def generate_summary(transcript: str, previous_summary=None):
     cache_key = _cache_key(transcript)
     if cache_key in _summary_cache:
         _summary_cache.move_to_end(cache_key)
-        logger.info("Summary cache HIT — skipping Gemini API call")
+        logger.info("Summary cache HIT — skipping Groq API call")
         return _summary_cache[cache_key]
 
     # ── Build context-aware prompt ──────────────────────────────────
@@ -51,83 +55,48 @@ async def generate_summary(transcript: str, previous_summary=None):
 
     user_prompt = f"{context}New transcript:\n{transcript}"
 
-    # ── API call — gemini-2.5-flash-lite (cheapest current model) ───
-    url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent"
-
-    headers = {
-        "Content-Type": "application/json",
-        "x-goog-api-key": GOOGLE_API_KEY,
-    }
-
-    data = {
-        "system_instruction": {
-            "parts": [{"text": _SYSTEM_INSTRUCTION}]
-        },
-        "contents": [
-            {
-                "parts": [
-                    {"text": user_prompt}
-                ]
-            }
-        ],
-        "generationConfig": {
-            "responseMimeType": "application/json"
-        },
-        "safetySettings": [
-            {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
-            {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
-            {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
-            {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
-        ]
-    }
-
     try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.post(url, headers=headers, json=data)
-            result = response.json()
+        chat_completion = await client.chat.completions.create(
+            messages=[
+                {
+                    "role": "system",
+                    "content": _SYSTEM_INSTRUCTION,
+                },
+                {
+                    "role": "user",
+                    "content": user_prompt,
+                }
+            ],
+            model=_MODEL_NAME,
+            response_format={"type": "json_object"},
+            temperature=0.3,
+            max_tokens=2048,
+        )
 
-        if "error" in result:
-            error_msg = result["error"].get("message", str(result["error"]))
-            logger.error(f"Gemini API error: {error_msg}")
-            return {"error": f"Gemini API error: {error_msg}"}
-
-        if "candidates" not in result or not result["candidates"]:
-            block_reason = result.get("promptFeedback", {}).get("blockReason", "unknown")
-            logger.warning(f"No candidates in Gemini response (blockReason={block_reason}): {result}")
-            return {"error": f"No candidates in Gemini response (reason: {block_reason})"}
-
-        raw_text = result["candidates"][0]["content"]["parts"][0]["text"]
-
-        # With responseMimeType=application/json, output should be clean JSON
-        cleaned_text = raw_text.strip()
-        if cleaned_text.startswith("```"):
-            cleaned_text = cleaned_text.replace("```json", "")
-            cleaned_text = cleaned_text.replace("```", "")
-            cleaned_text = cleaned_text.strip()
-
+        raw_text = chat_completion.choices[0].message.content
+        
         try:
-            parsed = json.loads(cleaned_text)
+            parsed = json.loads(raw_text)
 
             # ── Store in cache ──────────────────────────────────────
             _summary_cache[cache_key] = parsed
             if len(_summary_cache) > _CACHE_MAX_SIZE:
                 _summary_cache.popitem(last=False)
 
-            logger.info("Gemini API call succeeded — result cached")
+            logger.info(f"Groq API call ({_MODEL_NAME}) succeeded — result cached")
             return parsed
 
         except Exception as e:
+            logger.error(f"Failed to parse Groq JSON response: {e}")
             return {
-                "error": "Invalid JSON returned",
+                "error": "Invalid JSON returned from Groq",
                 "raw": raw_text,
                 "parse_error": str(e)
             }
 
-    except httpx.TimeoutException:
-        return {"error": "Gemini API request timed out"}
-
     except Exception as e:
+        logger.error(f"Groq API failure: {e}")
         return {
-            "error": "Gemini API failed",
+            "error": "Groq API failed",
             "details": str(e)
         }
