@@ -21,6 +21,55 @@ export default function useTranscript(roomId, name) {
   const networkErrorCountRef = useRef(0);
   const MAX_NETWORK_ERRORS = 5;
 
+  // ── FIX #3: rAF-batched transcript buffer ─────────────────────────
+  // Instead of calling setTranscript() on every single WebSocket echo,
+  // we buffer incoming transcript messages and flush them in a single
+  // state update per animation frame (~16ms). This prevents React from
+  // re-rendering 20+ times per second when interim results are rapid.
+  const transcriptBufferRef = useRef([]);
+  const rafIdRef = useRef(null);
+
+  const flushTranscript = useCallback(() => {
+    rafIdRef.current = null;
+    if (transcriptBufferRef.current.length === 0) return;
+
+    const batch = transcriptBufferRef.current;
+    transcriptBufferRef.current = [];
+
+    setTranscript(prev => {
+      // We use a copy-on-write pattern: `updated` stays === `prev`
+      // until we actually need to modify, avoiding unnecessary copies.
+      let updated = prev;
+
+      for (const entry of batch) {
+        const last = updated.length > 0 ? updated[updated.length - 1] : null;
+
+        // Client-side dedup: mirrors backend's is_near_duplicate logic.
+        // If the last entry is from the same speaker and one text is a
+        // substring of the other, replace in-place instead of appending.
+        if (last && last.speaker === entry.speaker) {
+          const lastText = last.text.trim();
+          const newText = entry.text.trim();
+
+          if (newText.includes(lastText) || lastText.includes(newText)) {
+            if (updated === prev) updated = [...prev];
+            updated[updated.length - 1] = {
+              ...last,
+              text: newText.length >= lastText.length ? newText : lastText,
+            };
+            continue;
+          }
+        }
+
+        // Genuinely new content or different speaker → append
+        if (updated === prev) updated = [...prev];
+        updated.push(entry);
+      }
+
+      return updated;
+    });
+  }, []);
+
   // Store connect function in ref to break circular dependency
   const scheduleReconnect = useCallback(() => {
     if (reconnectAttemptRef.current >= MAX_RECONNECT_ATTEMPTS) {
@@ -76,8 +125,13 @@ export default function useTranscript(roomId, name) {
           return;
         }
 
+        // FIX #3: Buffer transcript messages, flush once per frame
         if (data.type === "transcript") {
-          setTranscript(prev => [...prev, data]);
+          transcriptBufferRef.current.push(data);
+          if (!rafIdRef.current) {
+            rafIdRef.current = requestAnimationFrame(flushTranscript);
+          }
+          return;
         }
 
         if (data.type === "summary") {
@@ -97,7 +151,7 @@ export default function useTranscript(roomId, name) {
         }
       };
     }, 100);
-  }, [roomId, scheduleReconnect]);
+  }, [roomId, scheduleReconnect, flushTranscript]);
 
   // Keep connectRef in sync
   useEffect(() => {
@@ -112,20 +166,19 @@ export default function useTranscript(roomId, name) {
       unmountedRef.current = true;
       clearTimeout(connectDelayRef.current);
       clearTimeout(reconnectTimerRef.current);
+      cancelAnimationFrame(rafIdRef.current);
       socketRef.current?.close();
     };
   }, [connectWebSocket]);
 
 
-  // Safe send function
-  const safeSend = (payload) => {
-    if (
-      socketRef.current &&
-      socketRef.current.readyState === WebSocket.OPEN
-    ) {
-      socketRef.current.send(JSON.stringify(payload));
+  // Safe send — stable ref, no deps (reads socketRef.current at call time)
+  const safeSend = useCallback((payload) => {
+    const ws = socketRef.current;
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify(payload));
     }
-  };
+  }, []);
 
 
   const startMic = () => {
@@ -149,57 +202,90 @@ export default function useTranscript(roomId, name) {
 
     recognitionRef.current = new SpeechRecognition();
     recognitionRef.current.continuous = true;
-    recognitionRef.current.interimResults = false;
+    recognitionRef.current.interimResults = true; // FIX #1: real-time word-by-word
 
     isRecordingRef.current = true;
     networkErrorCountRef.current = 0;
 
+    // ── Error handler ───────────────────────────────────────────────
     recognitionRef.current.onerror = (event) => {
+      // Fatal: user denied mic permission
       if (event.error === 'not-allowed' || event.error === 'service-not-allowed') {
         console.error("Speech Recognition Error:", event.error);
         isRecordingRef.current = false;
         return;
       }
 
+      // Transient: network hiccup — count toward MAX_NETWORK_ERRORS
       if (event.error === 'network') {
         networkErrorCountRef.current += 1;
         if (networkErrorCountRef.current >= MAX_NETWORK_ERRORS) {
-          console.warn(`Speech recognition stopped after ${MAX_NETWORK_ERRORS} consecutive network errors. Check your internet connection.`);
+          console.warn(`Speech recognition stopped after ${MAX_NETWORK_ERRORS} consecutive network errors.`);
           isRecordingRef.current = false;
-          alert("Speech recognition lost connection to the server. Please check your internet and try again.");
+          alert("Speech recognition lost connection. Please check your internet and try again.");
           return;
         }
-        console.warn(`Speech recognition network error (${networkErrorCountRef.current}/${MAX_NETWORK_ERRORS})`);
+        console.warn(`Network error (${networkErrorCountRef.current}/${MAX_NETWORK_ERRORS})`);
         return;
       }
+
+      // Fast restarts can cause 'aborted' — harmless, ignore it
+      if (event.error === 'aborted') return;
 
       console.error("Speech Recognition Error:", event.error);
     };
 
+    // ── Result handler ──────────────────────────────────────────────
+    // FIX #1: Process BOTH interim and final results. The backend's
+    // is_near_duplicate() handles the rapid overlapping updates, so
+    // it's safe to send every interim. This makes transcription feel
+    // instant instead of waiting for full-sentence finalization.
     recognitionRef.current.onresult = (event) => {
-      const result = event.results[event.results.length - 1];
+      for (let i = event.resultIndex; i < event.results.length; i++) {
+        const result = event.results[i];
+        const text = result[0].transcript.trim();
+        if (!text) continue;
 
-      if (result.isFinal) {
-        // Reset network error count on successful recognition
-        networkErrorCountRef.current = 0;
-        safeSend({
-          speaker: name,
-          text: result[0].transcript
-        });
+        if (result.isFinal) {
+          // Successful final → healthy connection, reset error count
+          networkErrorCountRef.current = 0;
+        }
+
+        // Send both interim and final — payload stays { speaker, text }
+        safeSend({ speaker: name, text });
       }
     };
 
+    // ── End handler (auto-restart) ──────────────────────────────────
+    // FIX #2: The "deaf gap". The browser fires onend after pauses,
+    // silence timeouts, or transient errors. We restart IMMEDIATELY
+    // (0ms) when healthy, keeping the mic hot at all times. Backoff
+    // only kicks in when there are actual consecutive network errors.
     recognitionRef.current.onend = () => {
-      if (isRecordingRef.current) {
-        // Exponential backoff: 200ms, 400ms, 800ms, 1600ms, 3200ms
-        const delay = 200 * Math.pow(2, networkErrorCountRef.current);
-        setTimeout(() => {
-          try {
-            recognitionRef.current?.start();
-          } catch (error) {
-            console.log("Could not auto-restart mic:", error);
-          }
-        }, delay);
+      if (!isRecordingRef.current) return;
+
+      // Healthy: 0ms. Network errors: 100ms → 200ms → 400ms → … → 3200ms cap
+      const delay = networkErrorCountRef.current > 0
+        ? Math.min(100 * Math.pow(2, networkErrorCountRef.current - 1), 3200)
+        : 0;
+
+      const doRestart = () => {
+        if (!isRecordingRef.current) return;
+        try {
+          recognitionRef.current?.start();
+        } catch (e) {
+          // "already started" race — wait one tick and retry once
+          setTimeout(() => {
+            if (!isRecordingRef.current) return;
+            try { recognitionRef.current?.start(); } catch { /* give up */ }
+          }, 50);
+        }
+      };
+
+      if (delay === 0) {
+        doRestart();
+      } else {
+        setTimeout(doRestart, delay);
       }
     };
 
