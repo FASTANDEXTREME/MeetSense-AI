@@ -23,26 +23,63 @@ export default function MeetingRoom({ roomId, name }) {
     talkTime
   } = useTranscript(roomId, name);
 
+  /* ── Design Tokens ── */
+  const t = {
+    bg: "linear-gradient(160deg, #020617 0%, #0B1120 100%)",
+    surface: "#0F172A",
+    glass: "rgba(255, 255, 255, 0.04)",
+    glassBorder: "1px solid rgba(255, 255, 255, 0.08)",
+    blur: "blur(12px)",
+    textPrimary: "#E5E7EB",
+    textSecondary: "#9CA3AF",
+    accent: "#3B82F6",
+    accentHover: "#2563EB",
+    success: "#22C55E",
+    danger: "#E11D48",
+    dangerHover: "#BE123C",
+    radius: "12px",
+    radiusSm: "8px",
+    font: "'Inter', sans-serif",
+    transition: "all 200ms ease",
+  };
+
+  /* ── Shared Styles ── */
+  const glassCard = {
+    background: t.glass,
+    backdropFilter: t.blur,
+    WebkitBackdropFilter: t.blur,
+    border: t.glassBorder,
+    borderRadius: t.radius,
+  };
+
   return (
     <div style={{
       display: "flex",
       height: "100vh",
-      background: "linear-gradient(135deg, #667eea, #764ba2)",
-      fontFamily: "sans-serif",
-      color: "white"
+      background: t.bg,
+      fontFamily: t.font,
+      color: t.textPrimary
     }}>
 
       {/* LEFT SIDE */}
-      <div style={{ flex: 3, padding: "20px", overflowY: "auto" }}>
+      <div style={{ flex: 3, padding: "24px", overflowY: "auto" }}>
 
-        <h2>🎥 MeetSense AI Room: {roomId}</h2>
+        <h2 style={{
+          fontSize: "18px",
+          fontWeight: 600,
+          marginBottom: "20px",
+          letterSpacing: "-0.3px",
+          color: t.textPrimary
+        }}>
+          Room: <span style={{ color: t.accent }}>{roomId}</span>
+        </h2>
 
         {/* VIDEO GRID */}
         <div style={{
           display: "grid",
           gridTemplateColumns: "repeat(auto-fill, 250px)",
-          gap: "15px",
-          marginBottom: "20px"
+          gap: "16px",
+          marginBottom: "24px"
         }}>
 
           <video
@@ -52,15 +89,14 @@ export default function MeetingRoom({ roomId, name }) {
             playsInline
             style={{
               width: "250px",
-              borderRadius: "15px",
+              borderRadius: "14px",
               border:
                 activeSpeaker === name
-                  ? "4px solid #00ff88"
-                  : "3px solid white",
-              boxShadow:
-                activeSpeaker === name
-                  ? "0 0 20px #00ff88"
-                  : "none"
+                  ? `2px solid ${t.success}`
+                  : "1px solid rgba(255, 255, 255, 0.08)",
+              boxShadow: "none",
+              background: "#111827",
+              transition: t.transition
             }}
           />
 
@@ -76,93 +112,138 @@ export default function MeetingRoom({ roomId, name }) {
               }}
               style={{
                 width: "250px",
-                borderRadius: "15px",
-                border: "3px solid white"
+                borderRadius: "14px",
+                border: "1px solid rgba(255, 255, 255, 0.08)",
+                background: "#111827",
+                transition: t.transition
               }}
             />
           ))}
         </div>
 
         {/* MIC BUTTONS */}
-        <div style={{ marginBottom: "15px" }}>
+        <div style={{ marginBottom: "24px", display: "flex", gap: "10px" }}>
           <button onClick={startMic}
             style={{
               padding: "10px 20px",
-              marginRight: "10px",
-              background: "#00c9a7",
+              background: t.accent,
               border: "none",
-              borderRadius: "8px",
+              borderRadius: t.radiusSm,
               color: "white",
-              fontWeight: "bold",
-              cursor: "pointer"
-            }}>
+              fontWeight: 600,
+              fontSize: "13px",
+              fontFamily: t.font,
+              cursor: "pointer",
+              transition: t.transition
+            }}
+            onMouseEnter={(e) => { e.target.style.background = t.accentHover; }}
+            onMouseLeave={(e) => { e.target.style.background = t.accent; }}
+          >
             🎤 Start Speaking
           </button>
 
           <button onClick={stopMic}
             style={{
               padding: "10px 20px",
-              background: "#ff6b6b",
+              background: t.danger,
               border: "none",
-              borderRadius: "8px",
+              borderRadius: t.radiusSm,
               color: "white",
-              fontWeight: "bold",
-              cursor: "pointer"
-            }}>
+              fontWeight: 600,
+              fontSize: "13px",
+              fontFamily: t.font,
+              cursor: "pointer",
+              transition: t.transition
+            }}
+            onMouseEnter={(e) => { e.target.style.background = t.dangerHover; }}
+            onMouseLeave={(e) => { e.target.style.background = t.danger; }}
+          >
             ⛔ Stop
           </button>
 
           <button onClick={requestSummary}
             style={{
               padding: "10px 20px",
-              marginLeft: "10px",
-              background: "linear-gradient(135deg, #667eea, #764ba2)",
-              border: "2px solid rgba(255,255,255,0.3)",
-              borderRadius: "8px",
-              color: "white",
-              fontWeight: "bold",
+              background: "rgba(59, 130, 246, 0.12)",
+              border: "1px solid rgba(59, 130, 246, 0.25)",
+              borderRadius: t.radiusSm,
+              color: "#60A5FA",
+              fontWeight: 600,
+              fontSize: "13px",
+              fontFamily: t.font,
               cursor: "pointer",
-              boxShadow: "0 2px 10px rgba(102,126,234,0.4)"
-            }}>
+              transition: t.transition
+            }}
+            onMouseEnter={(e) => {
+              e.target.style.background = "rgba(59, 130, 246, 0.2)";
+              e.target.style.borderColor = "rgba(59, 130, 246, 0.4)";
+            }}
+            onMouseLeave={(e) => {
+              e.target.style.background = "rgba(59, 130, 246, 0.12)";
+              e.target.style.borderColor = "rgba(59, 130, 246, 0.25)";
+            }}
+          >
             📊 Generate Summary
           </button>
         </div>
 
         {/* TRANSCRIPT */}
         <div style={{
-          background: "rgba(255,255,255,0.1)",
-          padding: "15px",
-          borderRadius: "10px",
-          height: "200px",
+          ...glassCard,
+          padding: "20px",
+          height: "220px",
           overflowY: "auto"
         }}>
-          <h3>📝 Live Transcript</h3>
+          <h3 style={{
+            fontSize: "13px",
+            fontWeight: 600,
+            textTransform: "uppercase",
+            letterSpacing: "0.5px",
+            color: t.textSecondary,
+            marginBottom: "14px"
+          }}>Live Transcript</h3>
 
-          {transcript.map((t, i) => (
+          {transcript.map((t2, i) => (
             <div key={i}
               style={{
-                marginBottom: "5px",
-                padding: "5px",
-                background: "rgba(255,255,255,0.1)",
-                borderRadius: "6px"
+                marginBottom: "8px",
+                padding: "10px 12px",
+                background: "rgba(255, 255, 255, 0.03)",
+                borderRadius: "8px",
+                fontSize: "13px",
+                lineHeight: "1.5"
               }}>
-              <strong>{t.speaker}:</strong> {t.text}
+              <strong style={{ color: t.textPrimary, fontWeight: 600 }}>{t2.speaker}:</strong>{" "}
+              <span style={{ color: t.textSecondary, fontWeight: 400 }}>{t2.text}</span>
             </div>
           ))}
         </div>
 
         {/* TALK TIME */}
         <div style={{
-          marginTop: "15px",
-          background: "rgba(255,255,255,0.1)",
-          padding: "10px",
-          borderRadius: "10px"
+          ...glassCard,
+          marginTop: "16px",
+          padding: "20px"
         }}>
-          <h3>📊 Speaking Analytics</h3>
+          <h3 style={{
+            fontSize: "13px",
+            fontWeight: 600,
+            textTransform: "uppercase",
+            letterSpacing: "0.5px",
+            color: t.textSecondary,
+            marginBottom: "14px"
+          }}>Speaking Analytics</h3>
 
           {Object.entries(talkTime).map(([user, time]) => (
-            <div key={user}>
-              {user}: {(time / 60).toFixed(2)} mins
+            <div key={user} style={{
+              display: "flex",
+              justifyContent: "space-between",
+              padding: "8px 0",
+              fontSize: "13px",
+              borderBottom: "1px solid rgba(255, 255, 255, 0.05)"
+            }}>
+              <span style={{ color: t.textPrimary, fontWeight: 500 }}>{user}</span>
+              <span style={{ color: t.textSecondary }}>{(time / 60).toFixed(2)} mins</span>
             </div>
           ))}
         </div>
@@ -172,62 +253,147 @@ export default function MeetingRoom({ roomId, name }) {
       {/* RIGHT SIDE SUMMARY */}
       <div style={{
         flex: 1,
-        background: "white",
-        color: "#333",
-        padding: "20px",
+        background: t.surface,
+        borderLeft: "1px solid rgba(255, 255, 255, 0.06)",
+        color: t.textPrimary,
+        padding: "24px",
         overflowY: "auto"
       }}>
 
-        <h2 style={{ color: "#4f46e5" }}>📊 Meeting Summary</h2>
+        <h2 style={{
+          color: t.textPrimary,
+          fontSize: "16px",
+          fontWeight: 600,
+          marginBottom: "20px",
+          letterSpacing: "-0.2px"
+        }}>Meeting Summary</h2>
 
-        {!summary && <p>No summary yet...</p>}
+        {!summary && <p style={{
+          color: t.textSecondary,
+          fontSize: "13px",
+          fontStyle: "italic"
+        }}>No summary yet...</p>}
 
         {summary && !summary.error && (
           <>
-            <h3>👥 Speakers</h3>
+            <h3 style={{
+              fontSize: "12px",
+              fontWeight: 600,
+              textTransform: "uppercase",
+              letterSpacing: "0.5px",
+              color: t.textSecondary,
+              marginBottom: "12px"
+            }}>Speakers</h3>
             {summary.speakers &&
               Object.entries(summary.speakers).map(([speakerName, data]) => (
                 <div key={speakerName}
                   style={{
-                    marginBottom: "10px",
-                    padding: "10px",
-                    background: "#f3f4f6",
-                    borderRadius: "8px"
+                    marginBottom: "12px",
+                    padding: "14px",
+                    background: "rgba(255, 255, 255, 0.04)",
+                    border: "1px solid rgba(255, 255, 255, 0.06)",
+                    borderRadius: t.radius
                   }}>
-                  <strong>{speakerName}</strong>
+                  <strong style={{
+                    color: t.textPrimary,
+                    fontSize: "14px",
+                    fontWeight: 600
+                  }}>{speakerName}</strong>
 
-                  <h4 style={{ margin: "8px 0 4px", fontSize: "14px" }}>Key Points</h4>
-                  <ul>
+                  <h4 style={{
+                    margin: "12px 0 6px",
+                    fontSize: "11px",
+                    fontWeight: 600,
+                    textTransform: "uppercase",
+                    letterSpacing: "0.5px",
+                    color: t.accent
+                  }}>Key Points</h4>
+                  <ul style={{
+                    paddingLeft: "16px",
+                    margin: 0
+                  }}>
                     {data.key_points?.map((point, i) => (
-                      <li key={i}>{point}</li>
+                      <li key={i} style={{
+                        fontSize: "13px",
+                        color: t.textSecondary,
+                        marginBottom: "4px",
+                        lineHeight: "1.5"
+                      }}>{point}</li>
                     ))}
                   </ul>
 
                   {/* F6 fix: action_items live per-speaker, not top-level */}
-                  <h4 style={{ margin: "8px 0 4px", fontSize: "14px" }}>Action Items</h4>
-                  <ul>
+                  <h4 style={{
+                    margin: "12px 0 6px",
+                    fontSize: "11px",
+                    fontWeight: 600,
+                    textTransform: "uppercase",
+                    letterSpacing: "0.5px",
+                    color: t.accent
+                  }}>Action Items</h4>
+                  <ul style={{
+                    paddingLeft: "16px",
+                    margin: 0
+                  }}>
                     {data.action_items?.map((item, i) => (
-                      <li key={i}>{item}</li>
+                      <li key={i} style={{
+                        fontSize: "13px",
+                        color: t.textSecondary,
+                        marginBottom: "4px",
+                        lineHeight: "1.5"
+                      }}>{item}</li>
                     ))}
                   </ul>
                 </div>
               ))
             }
 
-            <h3>📌 Decisions</h3>
-            <ul>
+            <h3 style={{
+              fontSize: "12px",
+              fontWeight: 600,
+              textTransform: "uppercase",
+              letterSpacing: "0.5px",
+              color: t.textSecondary,
+              marginTop: "20px",
+              marginBottom: "10px"
+            }}>Decisions</h3>
+            <ul style={{
+              paddingLeft: "16px",
+              margin: 0
+            }}>
               {summary.decisions?.map((d, i) => (
-                <li key={i}>{d}</li>
+                <li key={i} style={{
+                  fontSize: "13px",
+                  color: t.textSecondary,
+                  marginBottom: "4px",
+                  lineHeight: "1.5"
+                }}>{d}</li>
               ))}
             </ul>
 
-            <h3>😊 Sentiment</h3>
-            <p>{summary.sentiment}</p>
+            <h3 style={{
+              fontSize: "12px",
+              fontWeight: 600,
+              textTransform: "uppercase",
+              letterSpacing: "0.5px",
+              color: t.textSecondary,
+              marginTop: "20px",
+              marginBottom: "10px"
+            }}>Sentiment</h3>
+            <p style={{
+              fontSize: "13px",
+              color: t.textSecondary,
+              lineHeight: "1.5"
+            }}>{summary.sentiment}</p>
           </>
         )}
 
         {summary && summary.error && (
-          <p style={{ color: "#ef4444" }}>
+          <p style={{
+            color: t.danger,
+            fontSize: "13px",
+            fontWeight: 500
+          }}>
             Summary error: {summary.error}
           </p>
         )}

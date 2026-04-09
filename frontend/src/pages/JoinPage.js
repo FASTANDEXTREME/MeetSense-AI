@@ -34,17 +34,32 @@ export default function JoinPage({ onJoin }) {
       display: "flex",
       justifyContent: "center",
       alignItems: "center",
-      background: "#f5f6fa"
+      background: "linear-gradient(160deg, #020617 0%, #0B1120 100%)",
+      fontFamily: "'Inter', sans-serif"
     }}>
       <div style={{
-        background: "white",
-        padding: "40px",
-        borderRadius: "15px",
-        width: "350px",
-        textAlign: "center",
-        boxShadow: "0 10px 30px rgba(0,0,0,0.1)"
+        background: "rgba(255, 255, 255, 0.04)",
+        backdropFilter: "blur(12px)",
+        WebkitBackdropFilter: "blur(12px)",
+        border: "1px solid rgba(255, 255, 255, 0.08)",
+        padding: "48px 40px",
+        borderRadius: "16px",
+        width: "380px",
+        textAlign: "center"
       }}>
-        <h2>🎥 MeetSense-AI</h2>
+        <h2 style={{
+          color: "#E5E7EB",
+          fontSize: "22px",
+          fontWeight: 700,
+          marginBottom: "8px",
+          letterSpacing: "-0.3px"
+        }}>MeetSense AI</h2>
+        <p style={{
+          color: "#9CA3AF",
+          fontSize: "14px",
+          fontWeight: 400,
+          marginBottom: "32px"
+        }}>Smart meeting assistant</p>
 
         <input
           id="room-id-input"
@@ -52,7 +67,22 @@ export default function JoinPage({ onJoin }) {
           value={roomId}
           onChange={(e) => setRoomId(e.target.value)}
           onKeyDown={handleKeyDown}
-          style={{ width: "100%", padding: "10px", marginBottom: "15px", boxSizing: "border-box" }}
+          style={{
+            width: "100%",
+            padding: "12px 14px",
+            marginBottom: "14px",
+            boxSizing: "border-box",
+            background: "#0F172A",
+            border: "1px solid rgba(255, 255, 255, 0.1)",
+            borderRadius: "10px",
+            color: "#E5E7EB",
+            fontSize: "14px",
+            fontFamily: "'Inter', sans-serif",
+            outline: "none",
+            transition: "border-color 200ms ease"
+          }}
+          onFocus={(e) => { e.target.style.borderColor = "rgba(59, 130, 246, 0.6)"; }}
+          onBlur={(e) => { e.target.style.borderColor = "rgba(255, 255, 255, 0.1)"; }}
         />
 
         <input
@@ -61,11 +91,31 @@ export default function JoinPage({ onJoin }) {
           value={name}
           onChange={(e) => setName(e.target.value)}
           onKeyDown={handleKeyDown}
-          style={{ width: "100%", padding: "10px", marginBottom: "15px", boxSizing: "border-box" }}
+          style={{
+            width: "100%",
+            padding: "12px 14px",
+            marginBottom: "14px",
+            boxSizing: "border-box",
+            background: "#0F172A",
+            border: "1px solid rgba(255, 255, 255, 0.1)",
+            borderRadius: "10px",
+            color: "#E5E7EB",
+            fontSize: "14px",
+            fontFamily: "'Inter', sans-serif",
+            outline: "none",
+            transition: "border-color 200ms ease"
+          }}
+          onFocus={(e) => { e.target.style.borderColor = "rgba(59, 130, 246, 0.6)"; }}
+          onBlur={(e) => { e.target.style.borderColor = "rgba(255, 255, 255, 0.1)"; }}
         />
 
         {error && (
-          <p style={{ color: "#ef4444", margin: "0 0 10px", fontSize: "14px" }}>
+          <p style={{
+            color: "#E11D48",
+            margin: "0 0 12px",
+            fontSize: "13px",
+            fontWeight: 500
+          }}>
             {error}
           </p>
         )}
@@ -74,14 +124,21 @@ export default function JoinPage({ onJoin }) {
           id="join-button"
           onClick={handleJoin}
           style={{
-            padding: "10px 20px",
-            background: "#4f46e5",
+            width: "100%",
+            padding: "12px 20px",
+            marginTop: "8px",
+            background: "#3B82F6",
             color: "white",
             border: "none",
-            borderRadius: "8px",
+            borderRadius: "10px",
             cursor: "pointer",
-            fontWeight: "bold"
+            fontWeight: 600,
+            fontSize: "14px",
+            fontFamily: "'Inter', sans-serif",
+            transition: "background 200ms ease"
           }}
+          onMouseEnter={(e) => { e.target.style.background = "#2563EB"; }}
+          onMouseLeave={(e) => { e.target.style.background = "#3B82F6"; }}
         >
           Join Meeting
         </button>
