@@ -41,18 +41,14 @@ cd MeetSense-AI
 ```
 
 ### 3. Environment Configuration
-Create a `.env` file from the supplied example:
-```bash
-cp .env.example .env
-```
+
 Open `.env` using `nano` or `vim` and fill in your API keys:
 ```bash
 nano .env
 ```
-Provide the keys:
+Provide the key:
 ```env
-OPENAI_API_KEY="your_openai_api_key_here"
-GOOGLE_API_KEY="your_google_api_key_here"
+GROQ_API_KEY="your_groq_api_key_here"
 ```
 
 ---
