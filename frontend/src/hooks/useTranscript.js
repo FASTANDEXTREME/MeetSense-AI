@@ -4,9 +4,8 @@ import { buildWsUrl } from "../utils/wsUrl";
 const MAX_RECONNECT_ATTEMPTS = 10;
 const BASE_RECONNECT_DELAY_MS = 1000;
 
-// Minimum RMS microphone energy required to treat a 100ms frame as speech (filters silence/fan noise)
-const SPEECH_RMS_THRESHOLD = 0.018;
-const MIN_VOICED_FRAMES_PER_CHUNK = 2;
+// Quiet speech easily exceeds 0.005 RMS while dead mic silence stays near ~0.0005-0.002
+const SPEECH_RMS_THRESHOLD = 0.005;
 
 /**
  * Strip punctuation and normalize case/whitespace so "hello" and "Hello."
@@ -37,6 +36,7 @@ export default function useTranscript(roomId, name) {
   const recorderTimerRef = useRef(null);
   const vadTimerRef = useRef(null);
   const audioCtxRef = useRef(null);
+  const activeSegStatsRef = useRef(null);
   const usingFallbackRef = useRef(false);
   const isRecordingRef = useRef(false);
   const reconnectAttemptRef = useRef(0);
@@ -65,7 +65,6 @@ export default function useTranscript(roomId, name) {
         const last = updated.length > 0 ? updated[updated.length - 1] : null;
 
         if (last && last.speaker === entry.speaker) {
-          // 1. Replace unfinished interim result in-place
           if (last.is_final === false) {
             if (updated === prev) updated = [...prev];
             updated[updated.length - 1] = {
@@ -76,7 +75,6 @@ export default function useTranscript(roomId, name) {
             continue;
           }
 
-          // 2. Punctuation- & case-insensitive dedup (e.g. "hello" vs "Hello.")
           const normLast = normalizeSpeech(last.text);
           const normNew = normalizeSpeech(entry.text);
 
@@ -201,35 +199,50 @@ export default function useTranscript(roomId, name) {
     connectRef.current = connectWebSocket;
   }, [connectWebSocket]);
 
-  const cleanupFallbackRecorder = useCallback(() => {
+  const cleanupFallbackRecorder = useCallback((flushActive = false) => {
     usingFallbackRef.current = false;
     clearInterval(recorderTimerRef.current);
     recorderTimerRef.current = null;
     clearInterval(vadTimerRef.current);
     vadTimerRef.current = null;
 
-    if (mediaRecorderRef.current && mediaRecorderRef.current.state !== "inactive") {
-      try {
-        mediaRecorderRef.current.stop();
-      } catch {
-        // ignore
-      }
-    }
+    const activeRecorder = mediaRecorderRef.current;
     mediaRecorderRef.current = null;
 
-    if (audioCtxRef.current) {
-      try {
-        audioCtxRef.current.close();
-      } catch {
-        // ignore
+    const releaseAudioHardware = () => {
+      if (audioCtxRef.current) {
+        try {
+          audioCtxRef.current.close();
+        } catch {
+          // ignore
+        }
+        audioCtxRef.current = null;
       }
-      audioCtxRef.current = null;
+      if (recorderStreamRef.current) {
+        recorderStreamRef.current.getTracks().forEach(t => t.stop());
+        recorderStreamRef.current = null;
+      }
+    };
+
+    if (activeRecorder && activeRecorder.state === "recording") {
+      if (flushActive) {
+        activeRecorder.addEventListener("stop", releaseAudioHardware, { once: true });
+        try {
+          activeRecorder.stop();
+          return;
+        } catch {
+          // fall through to immediate cleanup
+        }
+      } else {
+        try {
+          activeRecorder.stop();
+        } catch {
+          // ignore
+        }
+      }
     }
 
-    if (recorderStreamRef.current) {
-      recorderStreamRef.current.getTracks().forEach(t => t.stop());
-      recorderStreamRef.current = null;
-    }
+    releaseAudioHardware();
   }, []);
 
   useEffect(() => {
@@ -241,7 +254,7 @@ export default function useTranscript(roomId, name) {
       isRecordingRef.current = false;
       recognitionRef.current?.stop();
       recognitionRef.current = null;
-      cleanupFallbackRecorder();
+      cleanupFallbackRecorder(false);
       clearTimeout(connectDelayRef.current);
       clearTimeout(reconnectTimerRef.current);
       cancelAnimationFrame(rafIdRef.current);
@@ -257,8 +270,8 @@ export default function useTranscript(roomId, name) {
   }, []);
 
   /**
-   * Universal fallback for Brave / Firefox / Safari with client-side Voice Activity
-   * Detection (RMS energy gate) so silent chunks are never sent to Whisper.
+   * Universal fallback for Brave / Firefox / Safari with per-segment isolated
+   * RMS voice activity stats (safe against async MediaRecorder.onstop timing).
    */
   const startServerWhisperFallback = useCallback(async () => {
     if (usingFallbackRef.current || !isRecordingRef.current) return;
@@ -279,29 +292,39 @@ export default function useTranscript(roomId, name) {
 
       recorderStreamRef.current = stream;
 
-      // Setup Web Audio RMS Voice Activity Detector to drop silent segments locally
-      let voicedFramesInSegment = 0;
       const AudioCtx = window.AudioContext || window.webkitAudioContext;
       if (AudioCtx) {
-        const audioCtx = new AudioCtx();
-        audioCtxRef.current = audioCtx;
-        const source = audioCtx.createMediaStreamSource(stream);
-        const analyser = audioCtx.createAnalyser();
-        analyser.fftSize = 1024;
-        source.connect(analyser);
-        const pcm = new Float32Array(analyser.fftSize);
+        try {
+          const audioCtx = audioCtxRef.current || new AudioCtx();
+          if (audioCtx.state === "suspended") {
+            await audioCtx.resume().catch(() => {});
+          }
+          audioCtxRef.current = audioCtx;
+          const source = audioCtx.createMediaStreamSource(stream);
+          const analyser = audioCtx.createAnalyser();
+          analyser.fftSize = 1024;
+          source.connect(analyser);
+          const pcm = new Float32Array(analyser.fftSize);
 
-        vadTimerRef.current = setInterval(() => {
-          analyser.getFloatTimeDomainData(pcm);
-          let sumSq = 0;
-          for (let i = 0; i < pcm.length; i++) {
-            sumSq += pcm[i] * pcm[i];
-          }
-          const rms = Math.sqrt(sumSq / pcm.length);
-          if (rms >= SPEECH_RMS_THRESHOLD) {
-            voicedFramesInSegment += 1;
-          }
-        }, 100);
+          vadTimerRef.current = setInterval(() => {
+            const stats = activeSegStatsRef.current;
+            if (!stats || audioCtx.state !== "running") return;
+
+            analyser.getFloatTimeDomainData(pcm);
+            let sumSq = 0;
+            for (let i = 0; i < pcm.length; i++) {
+              sumSq += pcm[i] * pcm[i];
+            }
+            const rms = Math.sqrt(sumSq / pcm.length);
+            stats.samples += 1;
+            if (rms > stats.peakRms) stats.peakRms = rms;
+            if (rms >= SPEECH_RMS_THRESHOLD) {
+              stats.voicedFrames += 1;
+            }
+          }, 80);
+        } catch (vadErr) {
+          console.warn("WebAudio VAD unavailable, relying on backend silence filter:", vadErr);
+        }
       }
 
       const mimeType = MediaRecorder.isTypeSupported("audio/webm;codecs=opus")
@@ -310,7 +333,10 @@ export default function useTranscript(roomId, name) {
 
       const recordSegment = () => {
         if (!isRecordingRef.current || !recorderStreamRef.current) return;
-        voicedFramesInSegment = 0;
+
+        // Dedicated stats object per segment so starting the next segment never zeroes this one!
+        const segStats = { voicedFrames: 0, peakRms: 0, samples: 0 };
+        activeSegStatsRef.current = segStats;
 
         const recorder = new MediaRecorder(recorderStreamRef.current, { mimeType });
         mediaRecorderRef.current = recorder;
@@ -321,13 +347,17 @@ export default function useTranscript(roomId, name) {
         };
 
         recorder.onstop = () => {
-          const hadSpeech = !audioCtxRef.current || voicedFramesInSegment >= MIN_VOICED_FRAMES_PER_CHUNK;
-          if (!hadSpeech || chunks.length === 0) {
-            return; // Drop silent/ambient noise segment before hitting Whisper!
+          if (chunks.length === 0) return;
+
+          // Only gate on client VAD if WebAudio actually captured non-zero waveform samples
+          // (Brave Shields fingerprinting protection or suspended AudioContext produces peakRms === 0)
+          const vadActive = segStats.samples > 0 && segStats.peakRms > 0;
+          if (vadActive && segStats.voicedFrames < 1) {
+            return; // Pure silence — skip API call
           }
 
           const blob = new Blob(chunks, { type: mimeType });
-          if (blob.size < 1500) return;
+          if (blob.size < 1000) return;
 
           const reader = new FileReader();
           reader.onloadend = () => {
@@ -354,7 +384,7 @@ export default function useTranscript(roomId, name) {
           mediaRecorderRef.current.stop();
         }
         recordSegment();
-      }, 3500);
+      }, 3000);
     } catch (err) {
       console.error("Audio fallback error:", err);
       isRecordingRef.current = false;
@@ -378,6 +408,21 @@ export default function useTranscript(roomId, name) {
     isRecordingRef.current = true;
     setIsRecording(true);
     networkErrorCountRef.current = 0;
+
+    // Pre-create/unlock AudioContext synchronously inside the user click gesture
+    // so if Brave falls back to MediaRecorder + VAD asynchronously, it isn't suspended!
+    const AudioCtx = window.AudioContext || window.webkitAudioContext;
+    if (AudioCtx && !audioCtxRef.current) {
+      try {
+        const ctx = new AudioCtx();
+        if (ctx.state === "suspended") {
+          ctx.resume().catch(() => {});
+        }
+        audioCtxRef.current = ctx;
+      } catch {
+        // ignore
+      }
+    }
 
     safeSend({
       type: "speaking",
@@ -479,7 +524,7 @@ export default function useTranscript(roomId, name) {
     });
     recognitionRef.current?.stop();
     recognitionRef.current = null;
-    cleanupFallbackRecorder();
+    cleanupFallbackRecorder(true);
   };
 
   const requestSummary = () => {

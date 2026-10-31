@@ -23,8 +23,8 @@ _WHISPER_HALLUCINATIONS = {
     "amara org",
     "gracias",
     "merci",
-    "bye",
-    "you",
+    "i m going to go",
+    "im going to go",
 }
 
 # ── Groq Client Configuration (lazy-initialized) ────────────────────
@@ -68,7 +68,7 @@ def _seg_field(seg, name: str, default):
 async def transcribe_audio_chunk(audio_data_url: str) -> str:
     """
     Transcribe a base64 WebM/Opus audio chunk via Groq Whisper (whisper-large-v3-turbo)
-    with strict anti-hallucination thresholds on silent/noisy segments.
+    with silence/hallucination filtering tailored for Groq LPU verbose_json outputs.
     """
     api_key = get_groq_api_key()
     if not api_key or not audio_data_url:
@@ -77,7 +77,7 @@ async def transcribe_audio_chunk(audio_data_url: str) -> str:
     try:
         encoded = audio_data_url.split(",", 1)[-1]
         audio_bytes = base64.b64decode(encoded)
-        if len(audio_bytes) < 1500:
+        if len(audio_bytes) < 1000:
             return ""
 
         client = _get_client(api_key)
@@ -91,6 +91,7 @@ async def transcribe_audio_chunk(audio_data_url: str) -> str:
             req_kwargs["language"] = WHISPER_LANGUAGE
 
         transcription = await client.audio.transcriptions.create(**req_kwargs)
+        clip_duration = float(getattr(transcription, "duration", 0.0) or 0.0)
 
         segments = getattr(transcription, "segments", None)
         if segments is not None:
@@ -103,17 +104,22 @@ async def transcribe_audio_chunk(audio_data_url: str) -> str:
                 no_speech_prob = float(_seg_field(seg, "no_speech_prob", 0.0) or 0.0)
                 avg_logprob = float(_seg_field(seg, "avg_logprob", 0.0) or 0.0)
                 compression_ratio = float(_seg_field(seg, "compression_ratio", 1.0) or 1.0)
+                seg_end = float(_seg_field(seg, "end", 0.0) or 0.0)
 
-                # Official Whisper hallucination filters: high no_speech_prob, low confidence, or repetitive loops
-                if no_speech_prob > 0.45 or avg_logprob < -1.0 or compression_ratio > 2.4:
+                if no_speech_prob > 0.55 or avg_logprob < -1.1 or compression_ratio > 2.4:
                     continue
 
                 cleaned = _clean_alnum(seg_text)
                 if not cleaned:
                     continue
 
-                # Filter common Whisper noise hallucinations when confidence is borderline
-                if cleaned in _WHISPER_HALLUCINATIONS and (no_speech_prob > 0.15 or avg_logprob < -0.45):
+                # On silent short clips, Whisper predicts the 29.98s end-of-window token
+                # alongside stock phrases ("Thank you.", "Gracias.", "I'm going to go.")
+                is_window_overflow = clip_duration > 0 and seg_end > (clip_duration + 4.0)
+                if is_window_overflow and (cleaned in _WHISPER_HALLUCINATIONS or avg_logprob < -0.22):
+                    continue
+
+                if cleaned in _WHISPER_HALLUCINATIONS and avg_logprob < -0.35:
                     continue
 
                 kept.append(seg_text)
@@ -184,7 +190,6 @@ async def generate_summary(transcript: str, previous_summary=None):
             "max_completion_tokens": 2048,
         }
 
-        # Keep reasoning overhead minimal on Groq reasoning models to preserve Free Tier TPM/TPD
         if "gpt-oss" in GROQ_MODEL or "qwen3" in GROQ_MODEL:
             request_kwargs["reasoning_effort"] = "low"
 
@@ -195,7 +200,6 @@ async def generate_summary(transcript: str, previous_summary=None):
         try:
             parsed = json.loads(raw_text)
 
-            # ── Store in cache ──────────────────────────────────────
             _summary_cache[cache_key] = parsed
             if len(_summary_cache) > _CACHE_MAX_SIZE:
                 _summary_cache.popitem(last=False)
