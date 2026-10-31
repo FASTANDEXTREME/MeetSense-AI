@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import os
 import re
@@ -53,6 +54,26 @@ async def health_check():
         "model": GROQ_MODEL,
         "groq_configured": bool(get_groq_api_key()),
     }
+
+
+@app.get("/api/ice-servers")
+async def get_ice_servers():
+    servers = [
+        {"urls": "stun:stun.l.google.com:19302"},
+        {"urls": "stun:stun1.l.google.com:19302"},
+        {"urls": "stun:stun.cloudflare.com:3478"},
+    ]
+    turn_url = os.getenv("TURN_URL", "").strip()
+    if turn_url:
+        turn_entry = {"urls": [u.strip() for u in turn_url.split(",") if u.strip()]}
+        turn_user = os.getenv("TURN_USERNAME", "").strip()
+        turn_cred = os.getenv("TURN_CREDENTIAL", "").strip()
+        if turn_user:
+            turn_entry["username"] = turn_user
+        if turn_cred:
+            turn_entry["credential"] = turn_cred
+        servers.append(turn_entry)
+    return {"iceServers": servers}
 
 
 async def safe_broadcast(room_id: str, payload: dict, exclude: WebSocket = None):
@@ -338,7 +359,7 @@ async def websocket_transcript(websocket: WebSocket, room_id: str):
                 })
                 continue
 
-            # ================= AUDIO CHUNK FALLBACK (BRAVE / FIREFOX) =================
+            # ================= AUDIO CHUNK FALLBACK (BRAVE / FIREFOX / MOBILE) =================
             if data.get("type") == "audio_chunk":
                 speaker = data.get("speaker")
                 audio_data = data.get("audio")
@@ -449,6 +470,46 @@ async def websocket_vision(websocket: WebSocket, room_id: str, client_id: str):
 
 # ================= WEBRTC SIGNALING =================
 
+SIGNALING_HEARTBEAT_TIMEOUT_S = 45.0
+
+
+def _current_room_roster(room_id: str) -> dict:
+    return {
+        cid: rooms_peer_names[room_id].get(cid, "Participant")
+        for cid in list(rooms_signaling[room_id].keys())
+    }
+
+
+async def _broadcast_room_peers(room_id: str):
+    """Broadcast authoritative room participant map and evict any dead sockets discovered."""
+    dead_cids = []
+    roster = _current_room_roster(room_id)
+
+    for cid, conn in list(rooms_signaling[room_id].items()):
+        try:
+            await conn.send_json({
+                "type": "room_peers",
+                "peers": roster,
+            })
+        except Exception:
+            dead_cids.append(cid)
+
+    if dead_cids:
+        for cid in dead_cids:
+            rooms_signaling[room_id].pop(cid, None)
+            rooms_peer_names[room_id].pop(cid, None)
+        cleaned_roster = _current_room_roster(room_id)
+        for cid, conn in list(rooms_signaling[room_id].items()):
+            try:
+                await conn.send_json({
+                    "type": "room_peers",
+                    "peers": cleaned_roster,
+                })
+            except Exception:
+                rooms_signaling[room_id].pop(cid, None)
+                rooms_peer_names[room_id].pop(cid, None)
+
+
 @app.websocket("/ws/signal/{room_id}/{client_id}")
 async def signaling(
     websocket: WebSocket,
@@ -457,12 +518,22 @@ async def signaling(
     name: str = Query(default="Participant"),
 ):
     await websocket.accept()
+
+    # If this tab reconnected/refreshed with the same client_id, replace its stale socket cleanly
+    previous_ws = rooms_signaling[room_id].get(client_id)
+    is_reconnect = previous_ws is not None and previous_ws is not websocket
+    if is_reconnect:
+        try:
+            await previous_ws.close()
+        except Exception:
+            pass
+
     rooms_signaling[room_id][client_id] = websocket
     rooms_peer_names[room_id][client_id] = name
 
     existing_peers = {
         cid: rooms_peer_names[room_id].get(cid, "Participant")
-        for cid in rooms_signaling[room_id]
+        for cid in list(rooms_signaling[room_id].keys())
         if cid != client_id
     }
     if existing_peers:
@@ -474,11 +545,12 @@ async def signaling(
         except Exception:
             pass
 
+    event_type = "peer_reconnected" if is_reconnect else "new_peer"
     for cid, conn in list(rooms_signaling[room_id].items()):
         if cid != client_id:
             try:
                 await conn.send_json({
-                    "type": "new_peer",
+                    "type": event_type,
                     "client_id": client_id,
                     "name": name,
                 })
@@ -486,38 +558,74 @@ async def signaling(
                 rooms_signaling[room_id].pop(cid, None)
                 rooms_peer_names[room_id].pop(cid, None)
 
+    await _broadcast_room_peers(room_id)
+
     try:
         while True:
-            data = await websocket.receive_json()
+            data = await asyncio.wait_for(
+                websocket.receive_json(),
+                timeout=SIGNALING_HEARTBEAT_TIMEOUT_S,
+            )
+
+            if data.get("type") == "ping":
+                await websocket.send_json({
+                    "type": "pong",
+                    "peers": _current_room_roster(room_id),
+                })
+                continue
+
             target = data.get("target")
+            targets = data.get("targets")
 
-            if target and target in rooms_signaling[room_id]:
-                data["sender"] = client_id
-                data["sender_name"] = rooms_peer_names[room_id].get(client_id, "Participant")
+            data["sender"] = client_id
+            data["sender_name"] = rooms_peer_names[room_id].get(client_id, "Participant")
 
-                if "type" not in data:
-                    if "offer" in data:
-                        data["type"] = "offer"
-                    elif "answer" in data:
-                        data["type"] = "answer"
-                    elif "candidate" in data:
-                        data["type"] = "ice"
+            if "type" not in data:
+                if "offer" in data:
+                    data["type"] = "offer"
+                elif "answer" in data:
+                    data["type"] = "answer"
+                elif "candidate" in data:
+                    data["type"] = "ice"
 
+            recipient_ids = []
+            if target == "*":
+                recipient_ids = [cid for cid in list(rooms_signaling[room_id].keys()) if cid != client_id]
+            elif isinstance(targets, list):
+                recipient_ids = [cid for cid in targets if cid != client_id and cid in rooms_signaling[room_id]]
+            elif target and target in rooms_signaling[room_id]:
+                recipient_ids = [target]
+
+            evicted_any = False
+            for rid in recipient_ids:
+                conn = rooms_signaling[room_id].get(rid)
+                if not conn:
+                    continue
                 try:
-                    await rooms_signaling[room_id][target].send_json(data)
+                    await conn.send_json(data)
                 except Exception:
-                    rooms_signaling[room_id].pop(target, None)
-                    rooms_peer_names[room_id].pop(target, None)
+                    rooms_signaling[room_id].pop(rid, None)
+                    rooms_peer_names[room_id].pop(rid, None)
+                    evicted_any = True
+
+            if evicted_any:
+                await _broadcast_room_peers(room_id)
 
     except WebSocketDisconnect:
-        await _handle_peer_disconnect(room_id, client_id)
+        await _handle_peer_disconnect(room_id, client_id, websocket)
+    except asyncio.TimeoutError:
+        logger.info(f"Signaling heartbeat timeout for {client_id} in room '{room_id}'")
+        await _handle_peer_disconnect(room_id, client_id, websocket)
     except Exception as e:
         logger.error(f"Signaling WS error for {client_id}: {e}")
-        await _handle_peer_disconnect(room_id, client_id)
+        await _handle_peer_disconnect(room_id, client_id, websocket)
 
 
-async def _handle_peer_disconnect(room_id: str, client_id: str):
-    """Remove disconnected signaling client and notify remaining peers to clean up video tiles."""
+async def _handle_peer_disconnect(room_id: str, client_id: str, websocket: WebSocket = None):
+    """Remove disconnected signaling client (if not already replaced by a reconnect) and sync roster."""
+    if websocket is not None and rooms_signaling[room_id].get(client_id) is not websocket:
+        return
+
     rooms_signaling[room_id].pop(client_id, None)
     rooms_peer_names[room_id].pop(client_id, None)
 
@@ -531,7 +639,9 @@ async def _handle_peer_disconnect(room_id: str, client_id: str):
             rooms_signaling[room_id].pop(cid, None)
             rooms_peer_names[room_id].pop(cid, None)
 
-    if not rooms_signaling[room_id]:
+    if rooms_signaling[room_id]:
+        await _broadcast_room_peers(room_id)
+    else:
         rooms_signaling.pop(room_id, None)
         rooms_peer_names.pop(room_id, None)
 

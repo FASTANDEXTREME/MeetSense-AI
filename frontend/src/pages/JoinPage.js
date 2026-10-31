@@ -29,24 +29,11 @@ export default function JoinPage({ onJoin }) {
   };
 
   return (
-    <div style={{
-      height: "100vh",
-      display: "flex",
-      justifyContent: "center",
-      alignItems: "center",
-      background: "linear-gradient(160deg, #020617 0%, #0B1120 100%)",
-      fontFamily: "'Inter', sans-serif"
-    }}>
-      <div style={{
-        background: "rgba(255, 255, 255, 0.04)",
-        backdropFilter: "blur(12px)",
-        WebkitBackdropFilter: "blur(12px)",
-        border: "1px solid rgba(255, 255, 255, 0.08)",
-        padding: "48px 40px",
-        borderRadius: "16px",
-        width: "380px",
-        textAlign: "center"
-      }}>
+    <div
+      className="ms-join-page"
+      style={{ fontFamily: "'Inter', sans-serif" }}
+    >
+      <div className="ms-join-card">
         <h2 style={{
           color: "#E5E7EB",
           fontSize: "22px",
@@ -58,7 +45,7 @@ export default function JoinPage({ onJoin }) {
           color: "#9CA3AF",
           fontSize: "14px",
           fontWeight: 400,
-          marginBottom: "32px"
+          marginBottom: "28px"
         }}>Smart meeting assistant</p>
 
         <input
@@ -67,6 +54,8 @@ export default function JoinPage({ onJoin }) {
           value={roomId}
           onChange={(e) => setRoomId(e.target.value)}
           onKeyDown={handleKeyDown}
+          autoCapitalize="none"
+          autoCorrect="off"
           style={{
             width: "100%",
             padding: "12px 14px",
@@ -76,7 +65,7 @@ export default function JoinPage({ onJoin }) {
             border: "1px solid rgba(255, 255, 255, 0.1)",
             borderRadius: "10px",
             color: "#E5E7EB",
-            fontSize: "14px",
+            fontSize: "16px",
             fontFamily: "'Inter', sans-serif",
             outline: "none",
             transition: "border-color 200ms ease"
@@ -100,7 +89,7 @@ export default function JoinPage({ onJoin }) {
             border: "1px solid rgba(255, 255, 255, 0.1)",
             borderRadius: "10px",
             color: "#E5E7EB",
-            fontSize: "14px",
+            fontSize: "16px",
             fontFamily: "'Inter', sans-serif",
             outline: "none",
             transition: "border-color 200ms ease"
@@ -133,7 +122,7 @@ export default function JoinPage({ onJoin }) {
             borderRadius: "10px",
             cursor: "pointer",
             fontWeight: 600,
-            fontSize: "14px",
+            fontSize: "15px",
             fontFamily: "'Inter', sans-serif",
             transition: "background 200ms ease"
           }}

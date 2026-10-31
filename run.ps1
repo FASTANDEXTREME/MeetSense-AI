@@ -1,5 +1,6 @@
 # Windows PowerShell launcher for MeetSenseAI
 $ErrorActionPreference = "Stop"
+$env:PYTHONUTF8 = "1"
 
 Write-Host "======================================" -ForegroundColor Cyan
 Write-Host " Starting MeetSenseAI (Windows Mode)  " -ForegroundColor Cyan

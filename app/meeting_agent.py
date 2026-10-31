@@ -67,7 +67,7 @@ def _seg_field(seg, name: str, default):
 
 async def transcribe_audio_chunk(audio_data_url: str) -> str:
     """
-    Transcribe a base64 WebM/Opus audio chunk via Groq Whisper (whisper-large-v3-turbo)
+    Transcribe a base64 audio chunk in English via Groq Whisper (whisper-large-v3-turbo)
     with silence/hallucination filtering tailored for Groq LPU verbose_json outputs.
     """
     api_key = get_groq_api_key()
@@ -75,20 +75,32 @@ async def transcribe_audio_chunk(audio_data_url: str) -> str:
         return ""
 
     try:
-        encoded = audio_data_url.split(",", 1)[-1]
+        header, _, encoded = audio_data_url.partition(",")
+        if not encoded:
+            encoded = header
+            header = ""
         audio_bytes = base64.b64decode(encoded)
         if len(audio_bytes) < 1000:
             return ""
 
+        header_lower = header.lower()
+        if "mp4" in header_lower or "m4a" in header_lower or "aac" in header_lower:
+            chunk_filename = "chunk.mp4"
+        elif "ogg" in header_lower:
+            chunk_filename = "chunk.ogg"
+        elif "wav" in header_lower:
+            chunk_filename = "chunk.wav"
+        else:
+            chunk_filename = "chunk.webm"
+
         client = _get_client(api_key)
         req_kwargs = {
             "model": _WHISPER_MODEL,
-            "file": ("chunk.webm", audio_bytes),
+            "file": (chunk_filename, audio_bytes),
+            "language": WHISPER_LANGUAGE if WHISPER_LANGUAGE != "auto" else "en",
             "temperature": 0.0,
             "response_format": "verbose_json",
         }
-        if WHISPER_LANGUAGE and WHISPER_LANGUAGE.lower() != "auto":
-            req_kwargs["language"] = WHISPER_LANGUAGE
 
         transcription = await client.audio.transcriptions.create(**req_kwargs)
         clip_duration = float(getattr(transcription, "duration", 0.0) or 0.0)

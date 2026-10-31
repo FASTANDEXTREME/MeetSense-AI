@@ -8,6 +8,16 @@
   padding: 0;
 }
 
+html,
+body,
+#root {
+  width: 100%;
+  max-width: 100%;
+  min-height: 100vh;
+  min-height: 100dvh;
+  overflow-x: hidden;
+}
+
 body {
   font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto',
     'Oxygen', 'Ubuntu', 'Cantarell', 'Fira Sans', 'Droid Sans', 'Helvetica Neue',
@@ -21,6 +31,186 @@ body {
 code {
   font-family: source-code-pro, Menlo, Monaco, Consolas, 'Courier New',
     monospace;
+}
+
+/* ── Join Page Responsive Layout ── */
+.ms-join-page {
+  min-height: 100vh;
+  min-height: 100dvh;
+  width: 100%;
+  padding: 20px 16px;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  background: linear-gradient(160deg, #020617 0%, #0B1120 100%);
+}
+
+.ms-join-card {
+  background: rgba(255, 255, 255, 0.04);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  padding: 44px 36px;
+  border-radius: 16px;
+  width: min(380px, 100%);
+  text-align: center;
+}
+
+/* ── Meeting Room Responsive Layout ── */
+.ms-room-layout {
+  display: flex;
+  flex-direction: row;
+  height: 100vh;
+  height: 100dvh;
+  width: 100%;
+}
+
+.ms-main-panel {
+  flex: 3;
+  min-width: 0;
+  padding: 24px;
+  overflow-y: auto;
+}
+
+.ms-side-panel {
+  flex: 1;
+  min-width: 310px;
+  max-width: 400px;
+  padding: 24px;
+  overflow-y: auto;
+  border-left: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.ms-room-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 20px;
+}
+
+.ms-video-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(230px, 280px));
+  gap: 16px;
+  margin-bottom: 24px;
+}
+
+.ms-video-tile {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 4 / 3;
+  border-radius: 14px;
+  background: #111827;
+  overflow: hidden;
+}
+
+.ms-controls {
+  margin-bottom: 24px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.ms-control-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 40px;
+  white-space: nowrap;
+}
+
+.ms-transcript-box {
+  height: 220px;
+  overflow-y: auto;
+}
+
+/* ── Tablet & Mobile Breakpoint (<= 960px) ── */
+@media (max-width: 960px) {
+  .ms-room-layout {
+    flex-direction: column;
+    height: auto;
+    min-height: 100vh;
+    min-height: 100dvh;
+  }
+
+  .ms-main-panel {
+    flex: none;
+    width: 100%;
+    padding: 16px;
+    overflow-y: visible;
+  }
+
+  .ms-side-panel {
+    flex: none;
+    width: 100%;
+    min-width: 0;
+    max-width: none;
+    padding: 18px 16px 28px;
+    overflow-y: visible;
+    border-left: none;
+    border-top: 1px solid rgba(255, 255, 255, 0.08);
+  }
+
+  .ms-video-grid {
+    grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+    gap: 12px;
+    margin-bottom: 18px;
+  }
+}
+
+/* ── Phone Breakpoint (<= 640px) ── */
+@media (max-width: 640px) {
+  .ms-join-card {
+    padding: 32px 22px;
+  }
+
+  .ms-main-panel {
+    padding: 14px 12px;
+  }
+
+  .ms-side-panel {
+    padding: 16px 12px 28px;
+  }
+
+  .ms-video-grid[data-single="true"] {
+    grid-template-columns: minmax(0, 1fr);
+    max-width: 420px;
+    margin-left: auto;
+    margin-right: auto;
+  }
+
+  .ms-video-grid[data-single="false"] {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px;
+  }
+
+  .ms-controls {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
+    margin-bottom: 18px;
+  }
+
+  .ms-control-btn {
+    width: 100%;
+    padding: 10px 12px !important;
+    font-size: 13px !important;
+  }
+
+  .ms-control-btn-wide {
+    grid-column: 1 / -1;
+  }
+
+  .ms-transcript-box {
+    height: 200px;
+  }
+}
+
+@media (max-width: 350px) {
+  .ms-video-grid[data-single="false"] {
+    grid-template-columns: minmax(0, 1fr);
+  }
 }
 
 /* Scrollbar styling */

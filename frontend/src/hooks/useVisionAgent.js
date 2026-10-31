@@ -105,8 +105,6 @@ export default function useVisionAgent(roomId, clientId, externalVideoRef = null
     if (typeof document === "undefined") return;
 
     const canvas = document.createElement("canvas");
-    canvas.width = 320;
-    canvas.height = 240;
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
 
@@ -125,7 +123,15 @@ export default function useVisionAgent(roomId, clientId, externalVideoRef = null
         return;
       }
 
-      ctx.drawImage(videoEl, 0, 0, canvas.width, canvas.height);
+      const isPortrait = videoEl.videoHeight > videoEl.videoWidth;
+      const targetW = isPortrait ? 240 : 320;
+      const targetH = isPortrait ? 320 : 240;
+      if (canvas.width !== targetW || canvas.height !== targetH) {
+        canvas.width = targetW;
+        canvas.height = targetH;
+      }
+
+      ctx.drawImage(videoEl, 0, 0, targetW, targetH);
       const imageData = canvas.toDataURL("image/jpeg", 0.7);
       ws.send(imageData);
     }, CAPTURE_INTERVAL_MS);
