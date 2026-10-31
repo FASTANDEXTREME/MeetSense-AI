@@ -2,14 +2,30 @@ import base64
 import json
 import hashlib
 import logging
+import re
 from collections import OrderedDict
 
 from groq import AsyncGroq
-from app.config import GROQ_MODEL, get_groq_api_key
+from app.config import GROQ_MODEL, WHISPER_LANGUAGE, get_groq_api_key
 
 logger = logging.getLogger("meetsense")
 
 _WHISPER_MODEL = "whisper-large-v3-turbo"
+
+# Known Whisper subtitle artifacts emitted when fed background fan/room noise
+_WHISPER_HALLUCINATIONS = {
+    "thank you",
+    "thanks for watching",
+    "thank you for watching",
+    "subscribe",
+    "please subscribe",
+    "subtitles by",
+    "amara org",
+    "gracias",
+    "merci",
+    "bye",
+    "you",
+}
 
 # ── Groq Client Configuration (lazy-initialized) ────────────────────
 _client: AsyncGroq | None = None
@@ -39,10 +55,20 @@ def _cache_key(transcript: str, previous_summary=None) -> str:
     return hashlib.sha256(payload.encode()).hexdigest()
 
 
+def _clean_alnum(text: str) -> str:
+    return " ".join(re.sub(r"[^\w\s]", " ", text.lower(), flags=re.UNICODE).split())
+
+
+def _seg_field(seg, name: str, default):
+    if isinstance(seg, dict):
+        return seg.get(name, default)
+    return getattr(seg, name, default)
+
+
 async def transcribe_audio_chunk(audio_data_url: str) -> str:
     """
-    Transcribe a base64 WebM/Opus audio chunk via Groq Whisper (whisper-large-v3-turbo).
-    Used as an automatic fallback for browsers like Brave/Firefox that block Web Speech API.
+    Transcribe a base64 WebM/Opus audio chunk via Groq Whisper (whisper-large-v3-turbo)
+    with strict anti-hallucination thresholds on silent/noisy segments.
     """
     api_key = get_groq_api_key()
     if not api_key or not audio_data_url:
@@ -51,34 +77,56 @@ async def transcribe_audio_chunk(audio_data_url: str) -> str:
     try:
         encoded = audio_data_url.split(",", 1)[-1]
         audio_bytes = base64.b64decode(encoded)
-        if len(audio_bytes) < 1000:
+        if len(audio_bytes) < 1500:
             return ""
 
         client = _get_client(api_key)
-        transcription = await client.audio.transcriptions.create(
-            model=_WHISPER_MODEL,
-            file=("chunk.webm", audio_bytes),
-            temperature=0.0,
-            response_format="verbose_json",
-        )
+        req_kwargs = {
+            "model": _WHISPER_MODEL,
+            "file": ("chunk.webm", audio_bytes),
+            "temperature": 0.0,
+            "response_format": "verbose_json",
+        }
+        if WHISPER_LANGUAGE and WHISPER_LANGUAGE.lower() != "auto":
+            req_kwargs["language"] = WHISPER_LANGUAGE
 
-        # Filter silent chunks using Whisper's no_speech_prob when available
+        transcription = await client.audio.transcriptions.create(**req_kwargs)
+
         segments = getattr(transcription, "segments", None)
-        if segments:
-            kept = [
-                seg.get("text", "") if isinstance(seg, dict) else getattr(seg, "text", "")
-                for seg in segments
-                if (
-                    seg.get("no_speech_prob", 0.0)
-                    if isinstance(seg, dict)
-                    else getattr(seg, "no_speech_prob", 0.0)
-                )
-                < 0.65
-            ]
-            return " ".join(s.strip() for s in kept if s and s.strip()).strip()
+        if segments is not None:
+            kept = []
+            for seg in segments:
+                seg_text = (_seg_field(seg, "text", "") or "").strip()
+                if not seg_text:
+                    continue
 
-        text = (getattr(transcription, "text", "") or "").strip()
-        return text
+                no_speech_prob = float(_seg_field(seg, "no_speech_prob", 0.0) or 0.0)
+                avg_logprob = float(_seg_field(seg, "avg_logprob", 0.0) or 0.0)
+                compression_ratio = float(_seg_field(seg, "compression_ratio", 1.0) or 1.0)
+
+                # Official Whisper hallucination filters: high no_speech_prob, low confidence, or repetitive loops
+                if no_speech_prob > 0.45 or avg_logprob < -1.0 or compression_ratio > 2.4:
+                    continue
+
+                cleaned = _clean_alnum(seg_text)
+                if not cleaned:
+                    continue
+
+                # Filter common Whisper noise hallucinations when confidence is borderline
+                if cleaned in _WHISPER_HALLUCINATIONS and (no_speech_prob > 0.15 or avg_logprob < -0.45):
+                    continue
+
+                kept.append(seg_text)
+
+            result_text = " ".join(kept).strip()
+        else:
+            result_text = (getattr(transcription, "text", "") or "").strip()
+
+        cleaned_full = _clean_alnum(result_text)
+        if not cleaned_full or cleaned_full in {"gracias", "subtitles by", "amara org"}:
+            return ""
+
+        return result_text
     except Exception as e:
         logger.error(f"Groq Whisper transcription error: {e}")
         return ""

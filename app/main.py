@@ -164,6 +164,9 @@ async def _do_summary(room_id: str):
 
 async def _record_and_maybe_summarize(room_id: str, speaker: str, text: str, is_final: bool = True):
     """Broadcast transcript line and append finalized utterances to room summary buffer."""
+    if not _normalize_speech(text):
+        return
+
     await safe_broadcast(room_id, {
         "type": "transcript",
         "speaker": speaker,

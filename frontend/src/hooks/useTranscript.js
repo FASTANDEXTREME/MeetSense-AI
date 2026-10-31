@@ -4,6 +4,10 @@ import { buildWsUrl } from "../utils/wsUrl";
 const MAX_RECONNECT_ATTEMPTS = 10;
 const BASE_RECONNECT_DELAY_MS = 1000;
 
+// Minimum RMS microphone energy required to treat a 100ms frame as speech (filters silence/fan noise)
+const SPEECH_RMS_THRESHOLD = 0.018;
+const MIN_VOICED_FRAMES_PER_CHUNK = 2;
+
 /**
  * Strip punctuation and normalize case/whitespace so "hello" and "Hello."
  * or "i am fine i am fine" and "I am fine. I am fine." match cleanly.
@@ -31,6 +35,8 @@ export default function useTranscript(roomId, name) {
   const mediaRecorderRef = useRef(null);
   const recorderStreamRef = useRef(null);
   const recorderTimerRef = useRef(null);
+  const vadTimerRef = useRef(null);
+  const audioCtxRef = useRef(null);
   const usingFallbackRef = useRef(false);
   const isRecordingRef = useRef(false);
   const reconnectAttemptRef = useRef(0);
@@ -39,7 +45,6 @@ export default function useTranscript(roomId, name) {
   const connectRef = useRef(null);
   const networkErrorCountRef = useRef(0);
 
-  // ── FIX #3: rAF-batched transcript buffer ─────────────────────────
   const transcriptBufferRef = useRef([]);
   const rafIdRef = useRef(null);
 
@@ -54,12 +59,13 @@ export default function useTranscript(roomId, name) {
       let updated = prev;
 
       for (const entry of batch) {
+        if (!normalizeSpeech(entry.text)) continue;
+
         const entryIsFinal = entry.is_final !== false;
         const last = updated.length > 0 ? updated[updated.length - 1] : null;
 
         if (last && last.speaker === entry.speaker) {
-          // 1. If the previous line from this speaker was an unfinished interim
-          //    result, always replace it in-place with the latest interim/final update!
+          // 1. Replace unfinished interim result in-place
           if (last.is_final === false) {
             if (updated === prev) updated = [...prev];
             updated[updated.length - 1] = {
@@ -91,7 +97,6 @@ export default function useTranscript(roomId, name) {
           }
         }
 
-        // Genuinely new utterance or different speaker → append
         if (updated === prev) updated = [...prev];
         updated.push({
           speaker: entry.speaker,
@@ -200,6 +205,9 @@ export default function useTranscript(roomId, name) {
     usingFallbackRef.current = false;
     clearInterval(recorderTimerRef.current);
     recorderTimerRef.current = null;
+    clearInterval(vadTimerRef.current);
+    vadTimerRef.current = null;
+
     if (mediaRecorderRef.current && mediaRecorderRef.current.state !== "inactive") {
       try {
         mediaRecorderRef.current.stop();
@@ -208,6 +216,16 @@ export default function useTranscript(roomId, name) {
       }
     }
     mediaRecorderRef.current = null;
+
+    if (audioCtxRef.current) {
+      try {
+        audioCtxRef.current.close();
+      } catch {
+        // ignore
+      }
+      audioCtxRef.current = null;
+    }
+
     if (recorderStreamRef.current) {
       recorderStreamRef.current.getTracks().forEach(t => t.stop());
       recorderStreamRef.current = null;
@@ -239,28 +257,61 @@ export default function useTranscript(roomId, name) {
   }, []);
 
   /**
-   * Universal fallback for Brave / Firefox / Safari where window.SpeechRecognition
-   * is either missing or blocked (Brave blocks Google's proprietary speech servers).
-   * Streams short WebM/Opus chunks to the backend Groq Whisper endpoint.
+   * Universal fallback for Brave / Firefox / Safari with client-side Voice Activity
+   * Detection (RMS energy gate) so silent chunks are never sent to Whisper.
    */
   const startServerWhisperFallback = useCallback(async () => {
     if (usingFallbackRef.current || !isRecordingRef.current) return;
     usingFallbackRef.current = true;
 
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+        },
+      });
       if (!isRecordingRef.current) {
         stream.getTracks().forEach(t => t.stop());
         return;
       }
 
       recorderStreamRef.current = stream;
+
+      // Setup Web Audio RMS Voice Activity Detector to drop silent segments locally
+      let voicedFramesInSegment = 0;
+      const AudioCtx = window.AudioContext || window.webkitAudioContext;
+      if (AudioCtx) {
+        const audioCtx = new AudioCtx();
+        audioCtxRef.current = audioCtx;
+        const source = audioCtx.createMediaStreamSource(stream);
+        const analyser = audioCtx.createAnalyser();
+        analyser.fftSize = 1024;
+        source.connect(analyser);
+        const pcm = new Float32Array(analyser.fftSize);
+
+        vadTimerRef.current = setInterval(() => {
+          analyser.getFloatTimeDomainData(pcm);
+          let sumSq = 0;
+          for (let i = 0; i < pcm.length; i++) {
+            sumSq += pcm[i] * pcm[i];
+          }
+          const rms = Math.sqrt(sumSq / pcm.length);
+          if (rms >= SPEECH_RMS_THRESHOLD) {
+            voicedFramesInSegment += 1;
+          }
+        }, 100);
+      }
+
       const mimeType = MediaRecorder.isTypeSupported("audio/webm;codecs=opus")
         ? "audio/webm;codecs=opus"
         : "audio/webm";
 
       const recordSegment = () => {
         if (!isRecordingRef.current || !recorderStreamRef.current) return;
+        voicedFramesInSegment = 0;
+
         const recorder = new MediaRecorder(recorderStreamRef.current, { mimeType });
         mediaRecorderRef.current = recorder;
         const chunks = [];
@@ -270,9 +321,13 @@ export default function useTranscript(roomId, name) {
         };
 
         recorder.onstop = () => {
-          if (chunks.length === 0) return;
+          const hadSpeech = !audioCtxRef.current || voicedFramesInSegment >= MIN_VOICED_FRAMES_PER_CHUNK;
+          if (!hadSpeech || chunks.length === 0) {
+            return; // Drop silent/ambient noise segment before hitting Whisper!
+          }
+
           const blob = new Blob(chunks, { type: mimeType });
-          if (blob.size < 1200) return; // skip empty silence headers
+          if (blob.size < 1500) return;
 
           const reader = new FileReader();
           reader.onloadend = () => {
@@ -293,7 +348,6 @@ export default function useTranscript(roomId, name) {
       setSpeechError("");
       recordSegment();
 
-      // Flush complete self-contained 3.5s WebM files so every chunk has valid headers
       recorderTimerRef.current = setInterval(() => {
         if (!isRecordingRef.current) return;
         if (mediaRecorderRef.current && mediaRecorderRef.current.state === "recording") {
@@ -333,7 +387,6 @@ export default function useTranscript(roomId, name) {
     const SpeechRecognition =
       window.SpeechRecognition || window.webkitSpeechRecognition;
 
-    // Browsers without Web Speech API (e.g. Firefox) → use Groq Whisper fallback immediately
     if (!SpeechRecognition) {
       startServerWhisperFallback();
       return;
@@ -351,8 +404,6 @@ export default function useTranscript(roomId, name) {
         return;
       }
 
-      // Brave blocks Google's speech backend and immediately throws "network".
-      // Automatically switch to our backend Groq Whisper transcription!
       if (event.error === "network") {
         networkErrorCountRef.current += 1;
         if (networkErrorCountRef.current >= 1) {
@@ -376,7 +427,7 @@ export default function useTranscript(roomId, name) {
       for (let i = event.resultIndex; i < event.results.length; i++) {
         const result = event.results[i];
         const text = result[0].transcript.trim();
-        if (!text) continue;
+        if (!normalizeSpeech(text)) continue;
 
         if (result.isFinal) {
           networkErrorCountRef.current = 0;

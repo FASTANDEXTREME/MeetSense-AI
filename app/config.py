@@ -16,3 +16,4 @@ def get_groq_api_key() -> str | None:
 
 GROQ_API_KEY = get_groq_api_key()
 GROQ_MODEL = os.getenv("GROQ_MODEL", "openai/gpt-oss-20b").strip() or "openai/gpt-oss-20b"
+WHISPER_LANGUAGE = os.getenv("WHISPER_LANGUAGE", "en").strip() or "en"
