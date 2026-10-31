@@ -97,20 +97,27 @@ def _normalize_speech(text: str) -> str:
     return " ".join(cleaned.split())
 
 
+def _find_recent_speaker_idx(room_id: str, speaker: str, lookback: int = 5) -> int:
+    lines = rooms_transcripts[room_id]
+    prefix = f"{speaker}:"
+    start = max(0, len(lines) - lookback)
+    for idx in range(len(lines) - 1, start - 1, -1):
+        if lines[idx].startswith(prefix):
+            return idx
+    return -1
+
+
 def is_near_duplicate(room_id: str, speaker: str, text: str) -> bool:
     """
-    Check if the new transcript line is a near-duplicate of the last
-    entry from the same speaker (ignoring case and punctuation differences
-    between interim and finalized speech recognition results).
+    Check if the new transcript line is a near-duplicate of a recent
+    entry from the same speaker (safe even when multiple speakers talk at once).
     Returns True if the entry should be skipped or merged in-place.
     """
-    if not rooms_transcripts[room_id]:
+    idx = _find_recent_speaker_idx(room_id, speaker)
+    if idx == -1:
         return False
 
-    last = rooms_transcripts[room_id][-1]
-    if not last.startswith(f"{speaker}:"):
-        return False
-
+    last = rooms_transcripts[room_id][idx]
     last_text = last.split(":", 1)[1].strip()
     new_text = text.strip()
 
@@ -123,16 +130,16 @@ def is_near_duplicate(room_id: str, speaker: str, text: str) -> bool:
     # Identical words (e.g. "hello" -> "Hello."): prefer the better-formatted/longer version
     if norm_new == norm_last:
         if len(new_text) >= len(last_text) or any(ch.isupper() for ch in new_text):
-            rooms_transcripts[room_id][-1] = f"{speaker}: {new_text}"
+            rooms_transcripts[room_id][idx] = f"{speaker}: {new_text}"
         return True
 
-    # New text is a shorter fragment of the last line → skip
+    # New text is a shorter fragment of the speaker's line → skip
     if norm_new in norm_last:
         return True
 
-    # Last text is a prefix/substring of the expanded new line → replace with longer version
-    if norm_last and norm_last in norm_new:
-        rooms_transcripts[room_id][-1] = f"{speaker}: {new_text}"
+    # Previous line is a prefix/substring of an expanded re-emission (only when unmerged/latest)
+    if idx == len(rooms_transcripts[room_id]) - 1 and norm_last and norm_last in norm_new:
+        rooms_transcripts[room_id][idx] = f"{speaker}: {new_text}"
         return True
 
     return False
@@ -162,8 +169,29 @@ async def _do_summary(room_id: str):
     })
 
 
-async def _record_and_maybe_summarize(room_id: str, speaker: str, text: str, is_final: bool = True):
-    """Broadcast transcript line and append finalized utterances to room summary buffer."""
+def _ends_with_sentence_punct(text: str) -> bool:
+    return bool(re.search(r'[.?!]["\')\]}]*$', text.strip()))
+
+
+def _join_clauses(prev_text: str, next_text: str) -> str:
+    clean_prev = re.sub(r"\.{2,}$", "", prev_text.strip()).strip()
+    clean_next = re.sub(r"^\.{2,}\s*", "", next_text.strip()).strip()
+    if not clean_prev:
+        return clean_next
+    if not clean_next:
+        return clean_prev
+    return f"{clean_prev} {clean_next}"
+
+
+async def _record_and_maybe_summarize(
+    room_id: str,
+    speaker: str,
+    text: str,
+    is_final: bool = True,
+    continued: bool = False,
+    turn_id=None,
+):
+    """Broadcast transcript line and append/merge finalized utterances in room summary buffer."""
     if not _normalize_speech(text):
         return
 
@@ -172,6 +200,8 @@ async def _record_and_maybe_summarize(room_id: str, speaker: str, text: str, is_
         "speaker": speaker,
         "text": text,
         "is_final": is_final,
+        "continued": continued,
+        "turn_id": turn_id,
     })
 
     # Keep interim updates UI-only until finalized (or merge via normalized deduplication)
@@ -179,14 +209,24 @@ async def _record_and_maybe_summarize(room_id: str, speaker: str, text: str, is_
         return
 
     if not is_near_duplicate(room_id, speaker, text):
-        rooms_transcripts[room_id].append(f"{speaker}: {text}")
+        idx = _find_recent_speaker_idx(room_id, speaker)
+        if idx != -1:
+            prev_text = rooms_transcripts[room_id][idx].split(":", 1)[1].strip()
+            is_latest = idx == len(rooms_transcripts[room_id]) - 1
+            if continued or (is_latest and not _ends_with_sentence_punct(prev_text)):
+                rooms_transcripts[room_id][idx] = f"{speaker}: {_join_clauses(prev_text, text)}"
+            else:
+                rooms_transcripts[room_id].append(f"{speaker}: {text.strip()}")
+        else:
+            rooms_transcripts[room_id].append(f"{speaker}: {text.strip()}")
 
-    # ── Auto-summary: 1 min interval + 10 lines minimum ────
+    # ── Auto-summary: 1 min interval + 10 lines (or 120+ words) minimum ────
     now = time.time()
     line_count = len(rooms_transcripts[room_id])
+    word_count = sum(len(line.split()) for line in rooms_transcripts[room_id])
     elapsed = now - rooms_last_summary_time[room_id]
 
-    if line_count >= SUMMARY_MIN_LINES and elapsed >= SUMMARY_INTERVAL_SECONDS:
+    if (line_count >= SUMMARY_MIN_LINES or word_count >= 120) and elapsed >= SUMMARY_INTERVAL_SECONDS:
         if rate_limiter.can_call(room_id):
             result = await rate_limiter.execute(
                 room_id,
@@ -305,10 +345,19 @@ async def websocket_transcript(websocket: WebSocket, room_id: str):
                 if not speaker or not audio_data:
                     continue
 
+                continued = bool(data.get("continued", False))
+                turn_id = data.get("turn_id")
                 rooms_connection_speakers[websocket].add(speaker)
                 text = await transcribe_audio_chunk(audio_data)
                 if text:
-                    await _record_and_maybe_summarize(room_id, speaker, text, is_final=True)
+                    await _record_and_maybe_summarize(
+                        room_id,
+                        speaker,
+                        text,
+                        is_final=True,
+                        continued=continued,
+                        turn_id=turn_id,
+                    )
                 continue
 
             # ================= MANUAL SUMMARY REQUEST =================
@@ -336,8 +385,17 @@ async def websocket_transcript(websocket: WebSocket, room_id: str):
                 continue
 
             is_final = data.get("is_final", True) is not False
+            continued = bool(data.get("continued", False))
+            turn_id = data.get("turn_id")
             rooms_connection_speakers[websocket].add(speaker)
-            await _record_and_maybe_summarize(room_id, speaker, text, is_final=is_final)
+            await _record_and_maybe_summarize(
+                room_id,
+                speaker,
+                text,
+                is_final=is_final,
+                continued=continued,
+                turn_id=turn_id,
+            )
 
     except WebSocketDisconnect:
         try:

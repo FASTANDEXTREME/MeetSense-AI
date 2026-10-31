@@ -1,4 +1,4 @@
-import React, { useMemo } from "react";
+import React, { useEffect, useMemo, useRef } from "react";
 import useWebRTC from "../hooks/useWebRTC";
 import useTranscript from "../hooks/useTranscript";
 import useVisionAgent from "../hooks/useVisionAgent";
@@ -43,6 +43,17 @@ export default function MeetingRoom({ roomId, name, onLeave }) {
     visionEnabled,
     toggleVision,
   } = useVisionAgent(roomId, clientId, localVideoRef);
+
+  const transcriptBoxRef = useRef(null);
+
+  useEffect(() => {
+    const el = transcriptBoxRef.current;
+    if (!el) return;
+    const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+    if (distanceFromBottom < 120) {
+      el.scrollTop = el.scrollHeight;
+    }
+  }, [transcript]);
 
   /* ── Design Tokens ── */
   const t = {
@@ -344,7 +355,9 @@ export default function MeetingRoom({ roomId, name, onLeave }) {
         </div>
 
         {/* TRANSCRIPT */}
-        <div style={{
+        <div
+          ref={transcriptBoxRef}
+          style={{
           ...glassCard,
           padding: "20px",
           height: "220px",

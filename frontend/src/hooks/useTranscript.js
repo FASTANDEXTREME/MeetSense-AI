@@ -4,12 +4,23 @@ import { buildWsUrl } from "../utils/wsUrl";
 const MAX_RECONNECT_ATTEMPTS = 10;
 const BASE_RECONNECT_DELAY_MS = 1000;
 
-// Quiet speech easily exceeds 0.005 RMS while dead mic silence stays near ~0.0005-0.002
+// Voice Activity Detection (VAD) & utterance segmentation tuning
 const SPEECH_RMS_THRESHOLD = 0.005;
+const UTTERANCE_SILENCE_MS = 1150;   // Wait for a natural 1.15s pause before finalizing clip
+const MIN_SPEECH_DURATION_MS = 600;  // Minimum speech span before silence-triggered cut
+const SOFT_MAX_SEGMENT_MS = 13000;   // After 13s of non-stop talk, split cleanly on a 350ms breath
+const BREATH_PAUSE_MS = 350;
+const HARD_MAX_SEGMENT_MS = 22000;   // Stay safely inside Whisper's 30s acoustic window
+const IDLE_ROTATE_MS = 5000;         // Reset silent buffer every 5s so memory stays flat
+const NO_VAD_FALLBACK_MS = 10000;    // Fallback window only if WebAudio waveform reads are blocked
+
+// Transcript turn-merging windows
+const TURN_MERGE_WINDOW_MS = 10000;
+const INCOMPLETE_SENTENCE_MERGE_MS = 20000;
 
 /**
  * Strip punctuation and normalize case/whitespace so "hello" and "Hello."
- * or "i am fine i am fine" and "I am fine. I am fine." match cleanly.
+ * or "i am fine" and "I am fine." match cleanly.
  */
 function normalizeSpeech(str) {
   return (str || "")
@@ -17,6 +28,18 @@ function normalizeSpeech(str) {
     .replace(/[^\p{L}\p{N}\s]/gu, " ")
     .replace(/\s+/g, " ")
     .trim();
+}
+
+function endsWithTerminalPunctuation(str) {
+  return /[.?!]["')\]}]*$/.test((str || "").trim());
+}
+
+function joinTranscriptClauses(prevText, nextText) {
+  const cleanPrev = (prevText || "").trim().replace(/\.{2,}$/, "").trim();
+  const cleanNext = (nextText || "").trim().replace(/^\.{2,}\s*/, "").trim();
+  if (!cleanPrev) return cleanNext;
+  if (!cleanNext) return cleanPrev;
+  return `${cleanPrev} ${cleanNext}`;
 }
 
 export default function useTranscript(roomId, name) {
@@ -37,6 +60,8 @@ export default function useTranscript(roomId, name) {
   const vadTimerRef = useRef(null);
   const audioCtxRef = useRef(null);
   const activeSegStatsRef = useRef(null);
+  const noiseFloorRef = useRef(0.0025);
+  const turnIdRef = useRef(0);
   const usingFallbackRef = useRef(false);
   const isRecordingRef = useRef(false);
   const reconnectAttemptRef = useRef(0);
@@ -54,43 +79,142 @@ export default function useTranscript(roomId, name) {
 
     const batch = transcriptBufferRef.current;
     transcriptBufferRef.current = [];
+    const now = Date.now();
 
     setTranscript(prev => {
       let updated = prev;
 
       for (const entry of batch) {
-        if (!normalizeSpeech(entry.text)) continue;
+        const incomingText = (entry.text || "").trim();
+        const normNew = normalizeSpeech(incomingText);
+        if (!normNew) continue;
 
         const entryIsFinal = entry.is_final !== false;
-        const last = updated.length > 0 ? updated[updated.length - 1] : null;
+        const entryTurnId = entry.turn_id ?? null;
+        const entryContinued = Boolean(entry.continued);
 
-        if (last && last.speaker === entry.speaker) {
-          if (last.is_final === false) {
+        // Search recent entries so simultaneous speakers update their own in-flight bubble
+        // without shattering into interleaved fragments, while back-and-forth replies stay chronological.
+        let targetIdx = -1;
+        const minSearchIdx = Math.max(0, updated.length - 6);
+        for (let i = updated.length - 1; i >= minSearchIdx; i--) {
+          if (updated[i].speaker === entry.speaker) {
+            targetIdx = i;
+            break;
+          }
+        }
+
+        if (targetIdx !== -1) {
+          const target = updated[targetIdx];
+          const isLatestBubble = targetIdx === updated.length - 1;
+          const prevFinalized = target.finalizedText ?? (target.is_final ? target.text : "");
+          const prevLastClause = target.lastClause ?? prevFinalized;
+          const normLastClause = normalizeSpeech(prevLastClause);
+
+          // 1. Speaker's bubble had an active interim preview — update or finalize in-place even during overlap
+          if (target.is_final === false) {
             if (updated === prev) updated = [...prev];
-            updated[updated.length - 1] = {
-              speaker: entry.speaker,
-              text: entry.text.trim(),
-              is_final: entryIsFinal,
-            };
+            if (entryIsFinal) {
+              const mergedFinal = joinTranscriptClauses(prevFinalized, incomingText);
+              updated[targetIdx] = {
+                speaker: entry.speaker,
+                finalizedText: mergedFinal,
+                interimText: "",
+                lastClause: incomingText,
+                text: mergedFinal,
+                is_final: true,
+                turnId: entryTurnId ?? target.turnId,
+                updatedAt: now,
+              };
+            } else {
+              const previewText = joinTranscriptClauses(prevFinalized, incomingText);
+              updated[targetIdx] = {
+                ...target,
+                interimText: incomingText,
+                text: previewText,
+                is_final: false,
+                turnId: entryTurnId ?? target.turnId,
+                updatedAt: now,
+              };
+            }
             continue;
           }
 
-          const normLast = normalizeSpeech(last.text);
-          const normNew = normalizeSpeech(entry.text);
-
+          // 2. Deduplicate repeated/expanded emissions of the exact same clause for this speaker
           if (
-            normLast &&
-            normNew &&
-            (normNew.includes(normLast) || normLast.includes(normNew))
+            normLastClause &&
+            (normNew === normLastClause ||
+              normLastClause.includes(normNew) ||
+              normNew.startsWith(normLastClause))
           ) {
+            if (entryIsFinal && normNew.length >= normLastClause.length) {
+              if (updated === prev) updated = [...prev];
+              const prefixLen = Math.max(0, prevFinalized.length - prevLastClause.length);
+              const baseBeforeLast = prevFinalized.slice(0, prefixLen).trim();
+              const replacedFinal = joinTranscriptClauses(baseBeforeLast, incomingText);
+              updated[targetIdx] = {
+                ...target,
+                finalizedText: replacedFinal,
+                interimText: "",
+                lastClause: incomingText,
+                text: replacedFinal,
+                is_final: true,
+                updatedAt: now,
+              };
+            }
+            continue;
+          }
+
+          // 3. Merge continuous speech (and mid-sentence overlap), while keeping back-and-forth replies ordered
+          const differentExplicitTurn =
+            entryTurnId !== null &&
+            target.turnId !== null &&
+            entryTurnId !== target.turnId;
+
+          const sameExplicitTurn =
+            entryTurnId !== null &&
+            target.turnId !== null &&
+            entryTurnId === target.turnId;
+
+          const gapMs = now - (target.updatedAt || 0);
+          const prevIncomplete = !endsWithTerminalPunctuation(prevFinalized);
+
+          const shouldMerge = isLatestBubble
+            ? !differentExplicitTurn &&
+              (entryContinued ||
+                (prevIncomplete && gapMs < INCOMPLETE_SENTENCE_MERGE_MS) ||
+                (sameExplicitTurn && gapMs < TURN_MERGE_WINDOW_MS) ||
+                (!entryIsFinal && gapMs < TURN_MERGE_WINDOW_MS))
+            : !differentExplicitTurn &&
+              (entryContinued || (prevIncomplete && gapMs < 4500));
+
+          if (shouldMerge) {
             if (updated === prev) updated = [...prev];
-            const preferNew =
-              entryIsFinal || normNew.length >= normLast.length;
-            updated[updated.length - 1] = {
-              speaker: entry.speaker,
-              text: preferNew ? entry.text.trim() : last.text,
-              is_final: last.is_final || entryIsFinal,
-            };
+            if (entryIsFinal) {
+              const mergedFinal = joinTranscriptClauses(prevFinalized, incomingText);
+              updated[targetIdx] = {
+                speaker: entry.speaker,
+                finalizedText: mergedFinal,
+                interimText: "",
+                lastClause: incomingText,
+                text: mergedFinal,
+                is_final: true,
+                turnId: entryTurnId ?? target.turnId,
+                updatedAt: now,
+              };
+            } else {
+              const previewText = joinTranscriptClauses(prevFinalized, incomingText);
+              updated[targetIdx] = {
+                speaker: entry.speaker,
+                finalizedText: prevFinalized,
+                interimText: incomingText,
+                lastClause: prevLastClause,
+                text: previewText,
+                is_final: false,
+                turnId: entryTurnId ?? target.turnId,
+                updatedAt: now,
+              };
+            }
             continue;
           }
         }
@@ -98,8 +222,13 @@ export default function useTranscript(roomId, name) {
         if (updated === prev) updated = [...prev];
         updated.push({
           speaker: entry.speaker,
-          text: entry.text.trim(),
+          finalizedText: entryIsFinal ? incomingText : "",
+          interimText: entryIsFinal ? "" : incomingText,
+          lastClause: entryIsFinal ? incomingText : "",
+          text: incomingText,
           is_final: entryIsFinal,
+          turnId: entryTurnId,
+          updatedAt: now,
         });
       }
 
@@ -270,8 +399,10 @@ export default function useTranscript(roomId, name) {
   }, []);
 
   /**
-   * Universal fallback for Brave / Firefox / Safari with per-segment isolated
-   * RMS voice activity stats (safe against async MediaRecorder.onstop timing).
+   * Pause-driven voice-activity segmenter for Brave / Firefox / Safari.
+   * Never cuts mid-sentence: keeps recording while the user is actively speaking
+   * and only flushes once a natural pause (1.15s) occurs (or on a breath pause
+   * after 13s of non-stop speech, staying safely within Whisper's 30s limit).
    */
   const startServerWhisperFallback = useCallback(async () => {
     if (usingFallbackRef.current || !isRecordingRef.current) return;
@@ -291,6 +422,7 @@ export default function useTranscript(roomId, name) {
       }
 
       recorderStreamRef.current = stream;
+      noiseFloorRef.current = 0.0025;
 
       const AudioCtx = window.AudioContext || window.webkitAudioContext;
       if (AudioCtx) {
@@ -316,10 +448,31 @@ export default function useTranscript(roomId, name) {
               sumSq += pcm[i] * pcm[i];
             }
             const rms = Math.sqrt(sumSq / pcm.length);
+            const now = performance.now();
+
+            // Adaptive ambient noise floor so steady fan/AC hum doesn't prevent pause detection
+            const floor = noiseFloorRef.current;
+            if (rms < floor) {
+              noiseFloorRef.current = floor * 0.9 + rms * 0.1;
+            } else if (rms < floor * 1.8) {
+              noiseFloorRef.current = Math.min(0.02, floor * 0.995 + rms * 0.005);
+            }
+
+            const voiceThreshold = Math.max(
+              SPEECH_RMS_THRESHOLD,
+              Math.min(noiseFloorRef.current * 2.4, 0.025)
+            );
+
             stats.samples += 1;
+            stats.currentRms = rms;
             if (rms > stats.peakRms) stats.peakRms = rms;
-            if (rms >= SPEECH_RMS_THRESHOLD) {
+
+            if (rms >= voiceThreshold) {
               stats.voicedFrames += 1;
+              stats.lastVoiceAt = now;
+              if (!stats.firstVoiceAt) {
+                stats.firstVoiceAt = now;
+              }
             }
           }, 80);
         } catch (vadErr) {
@@ -331,11 +484,23 @@ export default function useTranscript(roomId, name) {
         ? "audio/webm;codecs=opus"
         : "audio/webm";
 
+      const currentTurnId = turnIdRef.current;
+
       const recordSegment = () => {
         if (!isRecordingRef.current || !recorderStreamRef.current) return;
 
-        // Dedicated stats object per segment so starting the next segment never zeroes this one!
-        const segStats = { voicedFrames: 0, peakRms: 0, samples: 0 };
+        const now = performance.now();
+        const segStats = {
+          startedAt: now,
+          firstVoiceAt: 0,
+          lastVoiceAt: 0,
+          voicedFrames: 0,
+          peakRms: 0,
+          currentRms: 0,
+          samples: 0,
+          continued: false,
+          turnId: currentTurnId,
+        };
         activeSegStatsRef.current = segStats;
 
         const recorder = new MediaRecorder(recorderStreamRef.current, { mimeType });
@@ -349,9 +514,7 @@ export default function useTranscript(roomId, name) {
         recorder.onstop = () => {
           if (chunks.length === 0) return;
 
-          // Only gate on client VAD if WebAudio actually captured non-zero waveform samples
-          // (Brave Shields fingerprinting protection or suspended AudioContext produces peakRms === 0)
-          const vadActive = segStats.samples > 0 && segStats.peakRms > 0;
+          const vadActive = segStats.samples > 4 && segStats.peakRms > 0;
           if (vadActive && segStats.voicedFrames < 1) {
             return; // Pure silence — skip API call
           }
@@ -366,6 +529,8 @@ export default function useTranscript(roomId, name) {
                 type: "audio_chunk",
                 speaker: name,
                 audio: reader.result,
+                continued: segStats.continued,
+                turn_id: segStats.turnId,
               });
             }
           };
@@ -375,16 +540,70 @@ export default function useTranscript(roomId, name) {
         recorder.start();
       };
 
+      const cutAndRestartSegment = (isContinuation = false) => {
+        if (!isRecordingRef.current || !recorderStreamRef.current) return;
+        const prevStats = activeSegStatsRef.current;
+        if (prevStats) {
+          prevStats.continued = isContinuation;
+        }
+        const prevRecorder = mediaRecorderRef.current;
+        // Start next segment first on the same stream so zero speech is lost across the boundary
+        recordSegment();
+        if (prevRecorder && prevRecorder.state === "recording") {
+          try {
+            prevRecorder.stop();
+          } catch {
+            // ignore
+          }
+        }
+      };
+
       setSpeechError("");
       recordSegment();
 
       recorderTimerRef.current = setInterval(() => {
         if (!isRecordingRef.current) return;
-        if (mediaRecorderRef.current && mediaRecorderRef.current.state === "recording") {
-          mediaRecorderRef.current.stop();
+        const stats = activeSegStatsRef.current;
+        if (!stats) return;
+
+        const now = performance.now();
+        const elapsed = now - stats.startedAt;
+        const vadActive = stats.samples > 4 && stats.peakRms > 0;
+
+        if (vadActive) {
+          if (stats.voicedFrames >= 2) {
+            const silenceMs = now - stats.lastVoiceAt;
+            const speechSpanMs = now - (stats.firstVoiceAt || stats.startedAt);
+
+            // 1. Natural end-of-sentence pause (1.15s of silence after speech)
+            if (speechSpanMs >= MIN_SPEECH_DURATION_MS && silenceMs >= UTTERANCE_SILENCE_MS) {
+              cutAndRestartSegment(false);
+              return;
+            }
+
+            // 2. Continuous long speech (>13s): split cleanly on a 350ms breath and merge seamlessly
+            if (elapsed >= SOFT_MAX_SEGMENT_MS && silenceMs >= BREATH_PAUSE_MS) {
+              cutAndRestartSegment(true);
+              return;
+            }
+
+            // 3. Hard cap (22s) so audio never exceeds Whisper's 30s window
+            if (elapsed >= HARD_MAX_SEGMENT_MS) {
+              cutAndRestartSegment(true);
+              return;
+            }
+          } else if (
+            stats.voicedFrames === 0 &&
+            elapsed >= IDLE_ROTATE_MS &&
+            stats.currentRms < SPEECH_RMS_THRESHOLD
+          ) {
+            // Quiet room idle buffer reset (nothing sent to backend)
+            cutAndRestartSegment(false);
+          }
+        } else if (elapsed >= NO_VAD_FALLBACK_MS) {
+          cutAndRestartSegment(true);
         }
-        recordSegment();
-      }, 3000);
+      }, 100);
     } catch (err) {
       console.error("Audio fallback error:", err);
       isRecordingRef.current = false;
@@ -403,6 +622,9 @@ export default function useTranscript(roomId, name) {
     if (isRecordingRef.current) {
       return;
     }
+
+    turnIdRef.current += 1;
+    const currentTurnId = turnIdRef.current;
 
     setSpeechError("");
     isRecordingRef.current = true;
@@ -482,6 +704,7 @@ export default function useTranscript(roomId, name) {
           speaker: name,
           text,
           is_final: Boolean(result.isFinal),
+          turn_id: currentTurnId,
         });
       }
     };
