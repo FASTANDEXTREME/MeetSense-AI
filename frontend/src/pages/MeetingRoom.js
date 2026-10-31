@@ -1,8 +1,9 @@
 import React, { useMemo } from "react";
 import useWebRTC from "../hooks/useWebRTC";
 import useTranscript from "../hooks/useTranscript";
+import useVisionAgent from "../hooks/useVisionAgent";
 
-export default function MeetingRoom({ roomId, name }) {
+export default function MeetingRoom({ roomId, name, onLeave }) {
 
   // F1 fix: stable clientId across re-renders
   const clientId = useMemo(
@@ -10,8 +11,15 @@ export default function MeetingRoom({ roomId, name }) {
     []
   );
 
-  const { localVideoRef, remoteStreams } =
-    useWebRTC(roomId, clientId);
+  const {
+    localVideoRef,
+    remotePeers,
+    micMuted,
+    cameraOff,
+    toggleAudio,
+    toggleVideo,
+    mediaError,
+  } = useWebRTC(roomId, clientId, name);
 
   const {
     transcript,
@@ -19,9 +27,22 @@ export default function MeetingRoom({ roomId, name }) {
     startMic,
     stopMic,
     requestSummary,
-    activeSpeaker,
-    talkTime
+    activeSpeakers,
+    talkTime,
+    socketReady,
+    isRecording,
+    speechError,
   } = useTranscript(roomId, name);
+
+  const {
+    engagement,
+    faceDetected,
+    lookingForward,
+    confidence,
+    connected: visionConnected,
+    visionEnabled,
+    toggleVision,
+  } = useVisionAgent(roomId, clientId, localVideoRef);
 
   /* ── Design Tokens ── */
   const t = {
@@ -35,6 +56,7 @@ export default function MeetingRoom({ roomId, name }) {
     accent: "#3B82F6",
     accentHover: "#2563EB",
     success: "#22C55E",
+    warning: "#F59E0B",
     danger: "#E11D48",
     dangerHover: "#BE123C",
     radius: "12px",
@@ -52,6 +74,26 @@ export default function MeetingRoom({ roomId, name }) {
     borderRadius: t.radius,
   };
 
+  const isLocalSpeaking = activeSpeakers.includes(name);
+
+  const attentionLabel = !visionEnabled
+    ? "Paused"
+    : !visionConnected
+    ? "Connecting..."
+    : !faceDetected
+    ? "No Face Detected"
+    : lookingForward
+    ? "Attentive"
+    : "Looking Away";
+
+  const attentionColor = !visionEnabled || !visionConnected
+    ? t.textSecondary
+    : !faceDetected
+    ? t.danger
+    : lookingForward
+    ? t.success
+    : t.warning;
+
   return (
     <div style={{
       display: "flex",
@@ -64,15 +106,58 @@ export default function MeetingRoom({ roomId, name }) {
       {/* LEFT SIDE */}
       <div style={{ flex: 3, padding: "24px", overflowY: "auto" }}>
 
-        <h2 style={{
-          fontSize: "18px",
-          fontWeight: 600,
-          marginBottom: "20px",
-          letterSpacing: "-0.3px",
-          color: t.textPrimary
+        <div style={{
+          display: "flex",
+          justifyContent: "space-between",
+          alignItems: "center",
+          marginBottom: "20px"
         }}>
-          Room: <span style={{ color: t.accent }}>{roomId}</span>
-        </h2>
+          <h2 style={{
+            fontSize: "18px",
+            fontWeight: 600,
+            letterSpacing: "-0.3px",
+            color: t.textPrimary
+          }}>
+            Room: <span style={{ color: t.accent }}>{roomId}</span>
+          </h2>
+
+          {onLeave && (
+            <button
+              onClick={() => {
+                if (isRecording) stopMic();
+                onLeave();
+              }}
+              style={{
+                padding: "8px 16px",
+                background: "rgba(225, 29, 72, 0.14)",
+                border: "1px solid rgba(225, 29, 72, 0.35)",
+                borderRadius: t.radiusSm,
+                color: "#FB7185",
+                fontWeight: 600,
+                fontSize: "12px",
+                fontFamily: t.font,
+                cursor: "pointer",
+                transition: t.transition
+              }}
+            >
+              Leave Room
+            </button>
+          )}
+        </div>
+
+        {(mediaError || speechError) && (
+          <div style={{
+            marginBottom: "16px",
+            padding: "10px 14px",
+            background: "rgba(225, 29, 72, 0.12)",
+            border: "1px solid rgba(225, 29, 72, 0.3)",
+            borderRadius: t.radiusSm,
+            color: "#FDA4AF",
+            fontSize: "13px"
+          }}>
+            {mediaError || speechError}
+          </div>
+        )}
 
         {/* VIDEO GRID */}
         <div style={{
@@ -82,86 +167,165 @@ export default function MeetingRoom({ roomId, name }) {
           marginBottom: "24px"
         }}>
 
-          <video
-            ref={localVideoRef}
-            autoPlay
-            muted
-            playsInline
-            style={{
-              width: "250px",
-              borderRadius: "14px",
-              border:
-                activeSpeaker === name
-                  ? `2px solid ${t.success}`
-                  : "1px solid rgba(255, 255, 255, 0.08)",
-              boxShadow: "none",
-              background: "#111827",
-              transition: t.transition
-            }}
-          />
-
-          {remoteStreams.map((stream, i) => (
+          {/* LOCAL VIDEO TILE */}
+          <div style={{ position: "relative", width: "250px" }}>
             <video
-              key={stream.id || i}
+              ref={localVideoRef}
               autoPlay
+              muted
               playsInline
-              ref={(video) => {
-                if (video && video.srcObject !== stream) {
-                  video.srcObject = stream;
-                }
-              }}
               style={{
                 width: "250px",
+                height: "188px",
+                objectFit: "cover",
                 borderRadius: "14px",
-                border: "1px solid rgba(255, 255, 255, 0.08)",
+                border: isLocalSpeaking
+                  ? `2px solid ${t.success}`
+                  : "1px solid rgba(255, 255, 255, 0.08)",
                 background: "#111827",
+                display: "block",
                 transition: t.transition
               }}
             />
-          ))}
+            <span style={{
+              position: "absolute",
+              bottom: "8px",
+              left: "8px",
+              padding: "3px 8px",
+              borderRadius: "6px",
+              background: "rgba(2, 6, 23, 0.72)",
+              fontSize: "11px",
+              fontWeight: 500,
+              color: t.textPrimary
+            }}>
+              {name} (You){micMuted ? " · Muted" : ""}
+            </span>
+          </div>
+
+          {/* REMOTE VIDEO TILES */}
+          {remotePeers.map((peer) => {
+            const isPeerSpeaking = activeSpeakers.includes(peer.name);
+            return (
+              <div key={peer.clientId} style={{ position: "relative", width: "250px" }}>
+                <video
+                  autoPlay
+                  playsInline
+                  ref={(video) => {
+                    if (video && video.srcObject !== peer.stream) {
+                      video.srcObject = peer.stream;
+                    }
+                  }}
+                  style={{
+                    width: "250px",
+                    height: "188px",
+                    objectFit: "cover",
+                    borderRadius: "14px",
+                    border: isPeerSpeaking
+                      ? `2px solid ${t.success}`
+                      : "1px solid rgba(255, 255, 255, 0.08)",
+                    background: "#111827",
+                    display: "block",
+                    transition: t.transition
+                  }}
+                />
+                <span style={{
+                  position: "absolute",
+                  bottom: "8px",
+                  left: "8px",
+                  padding: "3px 8px",
+                  borderRadius: "6px",
+                  background: "rgba(2, 6, 23, 0.72)",
+                  fontSize: "11px",
+                  fontWeight: 500,
+                  color: t.textPrimary
+                }}>
+                  {peer.name}
+                </span>
+              </div>
+            );
+          })}
         </div>
 
-        {/* MIC BUTTONS */}
-        <div style={{ marginBottom: "24px", display: "flex", gap: "10px" }}>
-          <button onClick={startMic}
+        {/* CONTROLS */}
+        <div style={{ marginBottom: "24px", display: "flex", flexWrap: "wrap", gap: "10px" }}>
+          <button
+            onClick={startMic}
+            disabled={!socketReady || isRecording}
             style={{
               padding: "10px 20px",
-              background: t.accent,
+              background: isRecording ? t.success : t.accent,
+              opacity: !socketReady ? 0.55 : 1,
               border: "none",
               borderRadius: t.radiusSm,
               color: "white",
               fontWeight: 600,
               fontSize: "13px",
               fontFamily: t.font,
-              cursor: "pointer",
+              cursor: !socketReady || isRecording ? "default" : "pointer",
               transition: t.transition
             }}
-            onMouseEnter={(e) => { e.target.style.background = t.accentHover; }}
-            onMouseLeave={(e) => { e.target.style.background = t.accent; }}
           >
-            🎤 Start Speaking
+            {isRecording ? "🎙️ Transcribing..." : "🎤 Start Speaking"}
           </button>
 
-          <button onClick={stopMic}
+          <button
+            onClick={stopMic}
+            disabled={!isRecording}
             style={{
               padding: "10px 20px",
               background: t.danger,
+              opacity: !isRecording ? 0.5 : 1,
               border: "none",
               borderRadius: t.radiusSm,
               color: "white",
               fontWeight: 600,
               fontSize: "13px",
               fontFamily: t.font,
-              cursor: "pointer",
+              cursor: !isRecording ? "default" : "pointer",
               transition: t.transition
             }}
-            onMouseEnter={(e) => { e.target.style.background = t.dangerHover; }}
-            onMouseLeave={(e) => { e.target.style.background = t.danger; }}
           >
             ⛔ Stop
           </button>
 
-          <button onClick={requestSummary}
+          <button
+            onClick={toggleAudio}
+            style={{
+              padding: "10px 16px",
+              background: "rgba(255, 255, 255, 0.06)",
+              border: "1px solid rgba(255, 255, 255, 0.12)",
+              borderRadius: t.radiusSm,
+              color: t.textPrimary,
+              fontWeight: 500,
+              fontSize: "13px",
+              fontFamily: t.font,
+              cursor: "pointer",
+              transition: t.transition
+            }}
+          >
+            {micMuted ? "🔇 Unmute Audio" : "🔊 Mute Audio"}
+          </button>
+
+          <button
+            onClick={toggleVideo}
+            style={{
+              padding: "10px 16px",
+              background: "rgba(255, 255, 255, 0.06)",
+              border: "1px solid rgba(255, 255, 255, 0.12)",
+              borderRadius: t.radiusSm,
+              color: t.textPrimary,
+              fontWeight: 500,
+              fontSize: "13px",
+              fontFamily: t.font,
+              cursor: "pointer",
+              transition: t.transition
+            }}
+          >
+            {cameraOff ? "📷 Turn Camera On" : "📹 Turn Camera Off"}
+          </button>
+
+          <button
+            onClick={requestSummary}
             style={{
               padding: "10px 20px",
               background: "rgba(59, 130, 246, 0.12)",
@@ -173,14 +337,6 @@ export default function MeetingRoom({ roomId, name }) {
               fontFamily: t.font,
               cursor: "pointer",
               transition: t.transition
-            }}
-            onMouseEnter={(e) => {
-              e.target.style.background = "rgba(59, 130, 246, 0.2)";
-              e.target.style.borderColor = "rgba(59, 130, 246, 0.4)";
-            }}
-            onMouseLeave={(e) => {
-              e.target.style.background = "rgba(59, 130, 246, 0.12)";
-              e.target.style.borderColor = "rgba(59, 130, 246, 0.25)";
             }}
           >
             📊 Generate Summary
@@ -202,6 +358,12 @@ export default function MeetingRoom({ roomId, name }) {
             color: t.textSecondary,
             marginBottom: "14px"
           }}>Live Transcript</h3>
+
+          {transcript.length === 0 && (
+            <p style={{ color: t.textSecondary, fontSize: "13px", fontStyle: "italic" }}>
+              Click "Start Speaking" to stream live captions to the room...
+            </p>
+          )}
 
           {transcript.map((t2, i) => (
             <div key={i}
@@ -234,6 +396,12 @@ export default function MeetingRoom({ roomId, name }) {
             marginBottom: "14px"
           }}>Speaking Analytics</h3>
 
+          {Object.keys(talkTime).length === 0 && (
+            <p style={{ color: t.textSecondary, fontSize: "13px", fontStyle: "italic" }}>
+              Speaking time updates when a speaker finishes a turn.
+            </p>
+          )}
+
           {Object.entries(talkTime).map(([user, time]) => (
             <div key={user} style={{
               display: "flex",
@@ -250,7 +418,7 @@ export default function MeetingRoom({ roomId, name }) {
 
       </div>
 
-      {/* RIGHT SIDE SUMMARY */}
+      {/* RIGHT SIDEBAR: ENGAGEMENT + SUMMARY */}
       <div style={{
         flex: 1,
         background: t.surface,
@@ -260,6 +428,77 @@ export default function MeetingRoom({ roomId, name }) {
         overflowY: "auto"
       }}>
 
+        {/* ENGAGEMENT CARD */}
+        <div style={{
+          marginBottom: "24px",
+          padding: "16px",
+          background: "rgba(255, 255, 255, 0.04)",
+          border: "1px solid rgba(255, 255, 255, 0.08)",
+          borderRadius: t.radius
+        }}>
+          <div style={{
+            display: "flex",
+            justifyContent: "space-between",
+            alignItems: "center",
+            marginBottom: "10px"
+          }}>
+            <h2 style={{
+              fontSize: "14px",
+              fontWeight: 600,
+              color: t.textPrimary
+            }}>Engagement Analytics</h2>
+            <button
+              onClick={toggleVision}
+              style={{
+                padding: "4px 10px",
+                background: "rgba(255, 255, 255, 0.06)",
+                border: "1px solid rgba(255, 255, 255, 0.12)",
+                borderRadius: "6px",
+                color: t.textSecondary,
+                fontSize: "11px",
+                cursor: "pointer"
+              }}
+            >
+              {visionEnabled ? "Pause" : "Resume"}
+            </button>
+          </div>
+
+          <div style={{
+            display: "flex",
+            justifyContent: "space-between",
+            alignItems: "baseline",
+            marginBottom: "8px"
+          }}>
+            <span style={{ fontSize: "24px", fontWeight: 700, color: t.textPrimary }}>
+              {engagement}%
+            </span>
+            <span style={{ fontSize: "12px", fontWeight: 600, color: attentionColor }}>
+              ● {attentionLabel}
+            </span>
+          </div>
+
+          <div style={{
+            width: "100%",
+            height: "6px",
+            borderRadius: "3px",
+            background: "rgba(255, 255, 255, 0.08)",
+            overflow: "hidden",
+            marginBottom: "8px"
+          }}>
+            <div style={{
+              width: `${Math.min(Math.max(engagement, 0), 100)}%`,
+              height: "100%",
+              background: t.accent,
+              transition: "width 300ms ease"
+            }} />
+          </div>
+
+          <p style={{ fontSize: "11px", color: t.textSecondary }}>
+            Detection confidence: {(confidence * 100).toFixed(0)}%
+          </p>
+        </div>
+
+        {/* MEETING SUMMARY */}
         <h2 style={{
           color: t.textPrimary,
           fontSize: "16px",

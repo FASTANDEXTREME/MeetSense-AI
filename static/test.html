@@ -1,9 +1,10 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
-    <title>MeetSense AI</title>
+    <meta charset="utf-8" />
+    <title>MeetSense AI — Test Client</title>
     <style>
-        body { margin: 0; font-family: Arial; background: #f5f6fa; }
+        body { margin: 0; font-family: Arial, sans-serif; background: #f5f6fa; }
 
         #joinScreen {
             height: 100vh;
@@ -23,6 +24,7 @@
 
         input {
             width: 100%;
+            box-sizing: border-box;
             padding: 10px;
             margin: 10px 0;
             border-radius: 8px;
@@ -36,13 +38,14 @@
             background: #4f46e5;
             color: white;
             cursor: pointer;
+            margin-right: 6px;
         }
 
         #meetingUI { display: none; height: 100vh; }
 
         #mainLayout { display: flex; height: 100%; }
 
-        #leftPanel { flex: 3; padding: 20px; }
+        #leftPanel { flex: 3; padding: 20px; overflow-y: auto; }
 
         #videoGrid {
             display: grid;
@@ -69,6 +72,7 @@
             padding: 15px;
             border-radius: 10px;
             margin-bottom: 20px;
+            white-space: pre-wrap;
         }
 
         #transcript {
@@ -84,7 +88,7 @@
 
 <div id="joinScreen">
     <div id="joinBox">
-        <h2>🎥 MeetSense AI</h2>
+        <h2>MeetSense AI</h2>
         <input id="roomInput" placeholder="Enter Room ID" />
         <input id="nameInput" placeholder="Enter Your Name" />
         <button onclick="joinMeeting()">Join Meeting</button>
@@ -101,16 +105,17 @@
             <br>
             <button onclick="startSpeaking()">Start Speaking</button>
             <button onclick="stopSpeaking()">Stop</button>
+            <button onclick="requestSummary()">Generate Summary</button>
 
             <h3>Transcript</h3>
             <div id="transcript"></div>
         </div>
 
         <div id="rightPanel">
-            <h3>🧠 Meeting Summary</h3>
-            <div id="summaryBox"></div>
+            <h3>Meeting Summary</h3>
+            <div id="summaryBox">No summary yet...</div>
 
-            <h3>👀 Engagement</h3>
+            <h3>Engagement</h3>
             <div id="engagementBox">0%</div>
         </div>
 
@@ -118,7 +123,6 @@
 </div>
 
 <script>
-
 let roomId;
 let userName;
 let transcriptSocket;
@@ -127,12 +131,19 @@ let visionSocket;
 let localStream;
 let peers = {};
 let recognition;
-let clientId = Math.random().toString(36).substring(2);
+const clientId = Math.random().toString(36).substring(2);
 const videoGrid = document.getElementById("videoGrid");
 
+function getWsBaseUrl() {
+    const isHttps = window.location.protocol === "https:";
+    const proto = isHttps ? "wss" : "ws";
+    const host = window.location.hostname || "localhost";
+    return isHttps ? `${proto}://${window.location.host || host}` : `${proto}://${host}:8000`;
+}
+
 function joinMeeting() {
-    roomId = document.getElementById("roomInput").value || "defaultRoom";
-    userName = document.getElementById("nameInput").value || "Guest";
+    roomId = (document.getElementById("roomInput").value || "defaultRoom").trim();
+    userName = (document.getElementById("nameInput").value || "Guest").trim();
 
     document.getElementById("joinScreen").style.display = "none";
     document.getElementById("meetingUI").style.display = "block";
@@ -140,8 +151,18 @@ function joinMeeting() {
     initializeMeeting();
 }
 
-async function initializeMeeting() {
+function appendTranscriptSafe(speaker, text) {
+    const row = document.createElement("div");
+    const bold = document.createElement("b");
+    bold.textContent = `${speaker}: `;
+    const span = document.createElement("span");
+    span.textContent = text;
+    row.appendChild(bold);
+    row.appendChild(span);
+    document.getElementById("transcript").appendChild(row);
+}
 
+async function initializeMeeting() {
     localStream = await navigator.mediaDevices.getUserMedia({
         video: true,
         audio: true
@@ -151,38 +172,51 @@ async function initializeMeeting() {
     localVideo.srcObject = localStream;
     localVideo.autoplay = true;
     localVideo.muted = true;
+    localVideo.playsInline = true;
     videoGrid.appendChild(localVideo);
 
-    transcriptSocket = new WebSocket(`ws://localhost:8000/ws/${roomId}`);
+    const wsBase = getWsBaseUrl();
+
+    transcriptSocket = new WebSocket(`${wsBase}/ws/${encodeURIComponent(roomId)}`);
 
     transcriptSocket.onmessage = (event) => {
         const data = JSON.parse(event.data);
 
         if (data.type === "transcript") {
-            document.getElementById("transcript").innerHTML +=
-                `<div><b>${data.speaker}:</b> ${data.text}</div>`;
+            appendTranscriptSafe(data.speaker, data.text);
         }
 
         if (data.type === "summary") {
-            document.getElementById("summaryBox").innerText =
+            document.getElementById("summaryBox").textContent =
                 JSON.stringify(data.data, null, 2);
         }
     };
 
     signalingSocket = new WebSocket(
-        `ws://localhost:8000/ws/signal/${roomId}/${clientId}`
+        `${wsBase}/ws/signal/${encodeURIComponent(roomId)}/${encodeURIComponent(clientId)}?name=${encodeURIComponent(userName)}`
     );
 
     signalingSocket.onmessage = async (event) => {
         const data = JSON.parse(event.data);
 
         if (data.type === "new_peer") {
-    if (!peers[data.client_id]) {
-        createPeerConnection(data.client_id, true);
-    }
-}
+            if (!peers[data.client_id]) {
+                await createPeerConnection(data.client_id, true);
+            }
+            return;
+        }
 
-        if (data.type === "offer") {
+        if (data.type === "peer_left") {
+            if (peers[data.client_id]) {
+                peers[data.client_id].close();
+                delete peers[data.client_id];
+            }
+            const el = document.getElementById("video-" + data.client_id);
+            if (el) el.remove();
+            return;
+        }
+
+        if (data.offer) {
             await createPeerConnection(data.sender, false);
             await peers[data.sender].setRemoteDescription(data.offer);
 
@@ -194,42 +228,42 @@ async function initializeMeeting() {
                 target: data.sender,
                 answer: answer
             }));
+            return;
         }
 
-        if (data.type === "answer") {
+        if (data.answer && peers[data.sender]) {
             await peers[data.sender].setRemoteDescription(data.answer);
+            return;
         }
 
-        if (data.type === "ice") {
+        if (data.candidate && peers[data.sender]) {
             await peers[data.sender].addIceCandidate(data.candidate);
         }
     };
 
     visionSocket = new WebSocket(
-        `ws://localhost:8000/ws/vision/${roomId}/${clientId}`
+        `${wsBase}/ws/vision/${encodeURIComponent(roomId)}/${encodeURIComponent(clientId)}`
     );
 
+    const canvas = document.createElement("canvas");
+    canvas.width = 320;
+    canvas.height = 240;
+    const ctx = canvas.getContext("2d");
+
     setInterval(() => {
-        const canvas = document.createElement("canvas");
-        canvas.width = 250;
-        canvas.height = 180;
-        const ctx = canvas.getContext("2d");
-        ctx.drawImage(videoGrid.querySelector("video"), 0, 0, 250, 180);
-        visionSocket.send(canvas.toDataURL("image/jpeg"));
-    }, 3000);
+        if (visionSocket.readyState !== WebSocket.OPEN || localVideo.readyState < 2) return;
+        ctx.drawImage(localVideo, 0, 0, 320, 240);
+        visionSocket.send(canvas.toDataURL("image/jpeg", 0.7));
+    }, 2000);
 
     visionSocket.onmessage = (event) => {
-    const data = JSON.parse(event.data);
-
-    document.getElementById("engagementBox").innerText =
-        data.engagement_score + "%";
-};
-
+        const data = JSON.parse(event.data);
+        document.getElementById("engagementBox").textContent =
+            `${data.engagement_score}% (${data.looking_forward ? "Attentive" : "Away"})`;
+    };
 }
 
 async function createPeerConnection(targetId, isInitiator) {
-
-    // Prevent duplicate peer creation
     if (peers[targetId]) return;
 
     const peer = new RTCPeerConnection({
@@ -238,12 +272,10 @@ async function createPeerConnection(targetId, isInitiator) {
 
     peers[targetId] = peer;
 
-    // Add local tracks
     localStream.getTracks().forEach(track => {
         peer.addTrack(track, localStream);
     });
 
-    // Create video element ONCE per peer
     const remoteVideo = document.createElement("video");
     remoteVideo.id = "video-" + targetId;
     remoteVideo.autoplay = true;
@@ -251,7 +283,6 @@ async function createPeerConnection(targetId, isInitiator) {
     videoGrid.appendChild(remoteVideo);
 
     peer.ontrack = (event) => {
-        // Attach stream only once
         if (!remoteVideo.srcObject) {
             remoteVideo.srcObject = event.streams[0];
         }
@@ -283,6 +314,11 @@ function startSpeaking() {
     recognition = new (window.SpeechRecognition || window.webkitSpeechRecognition)();
     recognition.continuous = true;
 
+    transcriptSocket.send(JSON.stringify({
+        type: "speaking",
+        speaker: userName
+    }));
+
     recognition.onresult = function(event) {
         const text = event.results[event.results.length - 1][0].transcript;
 
@@ -297,8 +333,19 @@ function startSpeaking() {
 
 function stopSpeaking() {
     if (recognition) recognition.stop();
+    if (transcriptSocket && transcriptSocket.readyState === WebSocket.OPEN) {
+        transcriptSocket.send(JSON.stringify({
+            type: "stopped_speaking",
+            speaker: userName
+        }));
+    }
 }
 
+function requestSummary() {
+    if (transcriptSocket && transcriptSocket.readyState === WebSocket.OPEN) {
+        transcriptSocket.send(JSON.stringify({ type: "request_summary" }));
+    }
+}
 </script>
 </body>
 </html>

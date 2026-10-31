@@ -8,7 +8,7 @@ logger = logging.getLogger("meetsense")
 
 class SummaryRateLimiter:
     """
-    Per-room rate limiter for Gemini summary calls.
+    Per-room rate limiter for Groq summary calls.
 
     - min_interval: minimum seconds between calls for the same room
     - max_concurrent: global cap on simultaneous API calls
@@ -28,12 +28,14 @@ class SummaryRateLimiter:
         elapsed = time.time() - self._last_call[room_id]
         return elapsed >= self.min_interval
 
-    async def execute(self, room_id: str, coro):
+    async def execute(self, room_id: str, coro_or_fn):
         """
-        Execute the coroutine if rate limit allows, otherwise return None.
+        Execute the coroutine (or async callable) if rate limit allows, otherwise return None.
         Uses a semaphore to cap global concurrent API calls.
         """
         if not self.can_call(room_id):
+            if asyncio.iscoroutine(coro_or_fn):
+                coro_or_fn.close()
             logger.debug(f"Rate limiter: skipping summary for room '{room_id}' (too soon or pending)")
             return None
 
@@ -41,6 +43,7 @@ class SummaryRateLimiter:
         try:
             async with self._semaphore:
                 self._last_call[room_id] = time.time()
+                coro = coro_or_fn() if callable(coro_or_fn) else coro_or_fn
                 return await coro
         finally:
             self._pending[room_id] = False
@@ -49,6 +52,11 @@ class SummaryRateLimiter:
         """Allow immediate next call (used for manual summary requests)."""
         self._last_call[room_id] = 0
         self._pending[room_id] = False
+
+    def cleanup_room(self, room_id: str):
+        """Remove rate-limiter state for an empty room."""
+        self._last_call.pop(room_id, None)
+        self._pending.pop(room_id, None)
 
 
 # Singleton: 60 seconds min interval, max 2 concurrent API calls globally

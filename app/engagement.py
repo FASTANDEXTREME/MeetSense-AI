@@ -21,3 +21,14 @@ def update_engagement(room_id: str, client_id: str, is_looking_forward: bool):
 
     # total is always >= 1 here since we just incremented it
     return round((engaged / total) * 100, 2)
+
+
+def remove_client_engagement(room_id: str, client_id: str):
+    if room_id in rooms_engagement:
+        rooms_engagement[room_id].pop(client_id, None)
+        if not rooms_engagement[room_id]:
+            rooms_engagement.pop(room_id, None)
+
+
+def cleanup_engagement(room_id: str):
+    rooms_engagement.pop(room_id, None)

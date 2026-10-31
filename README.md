@@ -1,126 +1,137 @@
-# MeetSenseAI - Headless VM Deployment
+# MeetSenseAI — Smart Meeting Assistant
 
-MeetSenseAI is an advanced web-based AI meeting assistant that performs real-time audio transcription, meeting summarization, facial engagement tracking, and multi-user WebRTC video conferencing.
+MeetSenseAI is a web-based AI meeting assistant that provides real-time audio transcription, incremental AI meeting summarization, facial engagement & head-pose tracking, and multi-user WebRTC video conferencing.
 
-This repository has been fully optimized and prepared to run efficiently on a **Headless Linux Virtual Machine (VM)** (e.g., Ubuntu Server, Debian) without the need for a GUI or display server.
+It runs locally on **Windows, macOS, and Linux** and is ready for **Headless Cloud VM deployment (Microsoft Azure / AWS / GCP)** without requiring a GUI or display server.
 
 ## Features
-- **Real-time Transcription & Summarization**: Connects to the device's microphone and provides ongoing text transcripts, automatically summarizing using the Gemini API.
-- **Engagement Analytics**: Uses `opencv-python-headless` and a baked-in AI SSD model to evaluate viewer engagement in a fully backend-driven, headless environment.
-- **WebRTC Conferencing**: Facilitates peer-to-peer audio/video streaming via websockets.
+- **Real-Time Transcription & Talk-Time Analytics**: Live word-by-word speech captions via Web Speech API (Chrome/Edge) with automatic **Groq Whisper (`whisper-large-v3-turbo`)** fallback for privacy-hardened browsers like **Brave** and **Firefox**, plus case/punctuation-aware deduplication and per-speaker talk-time tracking.
+- **Incremental AI Summarization**: Extracts per-speaker key points, action items, decisions, and meeting sentiment via **Groq** (`openai/gpt-oss-20b` by default — lightweight & Free Tier eligible).
+- **Headless Facial Engagement Tracking**: Uses `opencv-python-headless` with OpenCV's **`FaceDetectorYN` (YuNet ONNX)** detector (compatible with both OpenCV 4.x and 5.x) to evaluate face presence and 5-landmark head-pose orientation (`Attentive` vs `Looking Away`).
+- **Multi-Peer WebRTC Conferencing**: Peer-to-peer audio/video streaming with participant name badges, active-speaker highlights, audio/video mute controls, and automatic peer disconnect cleanup.
 
 ## Tech Stack
-- **Backend**: FastAPI (Python 3), Uvicorn, OpenCV (DNN for headless face detection)
-- **Frontend**: React.js, WebRTC, WebSocket API
-- **AI Models**: Gemini API (for summarization), MobileNet-SSD (for facial tracking)
-
-## System Requirements
-- **OS**: Any Linux Distribution (Ubuntu 20.04/22.04+ or Debian recommended)
-- **Dependencies**: 
-  - Python 3.9+
-  - Node.js 18+ and npm
-  - pip (Python package manager)
+- **Backend**: FastAPI (Python 3.10+), Uvicorn, OpenCV (`FaceDetectorYN` + YuNet ONNX), Groq Async SDK
+- **Frontend**: React, WebRTC, Web Speech API + MediaRecorder Whisper Fallback, WebSocket API
+- **AI Models**: `openai/gpt-oss-20b` & `whisper-large-v3-turbo` (Groq Cloud API), `face_detection_yunet_2023mar.onnx` (OpenCV Zoo)
 
 ---
 
-## 🛠️ Installation & Setup (Headless Linux VM)
+## Local Development Setup
 
-### 1. Install System Dependencies (Ubuntu/Debian)
-Update your package list and install the required OS-level packages:
-```bash
-sudo apt update
-sudo apt install -y nodejs npm
-sudo apt install -y python3 python3-pip python3-venv git curl wget
-```
-
-### 2. Clone the Repository
-SSH into your Linux VM and clone the project:
+### 1. Clone & Configure `.env`
 ```bash
 git clone https://github.com/FASTANDEXTREME/MeetSense-AI.git
 cd MeetSense-AI
+cp .env.example .env
 ```
-
-### 3. Environment Configuration
-
-Open `.env` using `nano` or `vim` and fill in your API keys:
-```bash
-nano .env
-```
-Provide the key:
+Edit `.env` and set your free [Groq API key](https://console.groq.com/keys):
 ```env
 GROQ_API_KEY="your_groq_api_key_here"
+GROQ_MODEL="openai/gpt-oss-20b"
 ```
 
----
+### 2A. Run Locally on Windows (PowerShell)
+```powershell
+powershell -ExecutionPolicy Bypass -File .\run.ps1
+```
+*(Or run Backend and Frontend in two separate terminals: `python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload` and `cd frontend && npm start`.)*
 
-## 🚀 How to Run the Project
-
-### Method 1: Using the automated `run.sh` script
-We provide an all-in-one execution script:
+### 2B. Run Locally on Linux / macOS
 ```bash
-# Make the script executable
 chmod +x run.sh
-
-# Run the script
 ./run.sh
 ```
-This script will:
-1. Automatically install Python requirements (`requirements.txt`).
-2. Automatically install Node dependencies (`npm install`).
-3. Start the FastAPI server in the background on port `8000`.
-4. Start the React Frontend server on port `3000`.
 
-*Note: Since this relies on `npm start`, it's recommended mainly for development or testing VM use.*
+Open `http://localhost:3000` in your browser.
 
-### Method 2: Running As Background Services (Production/Systemd)
-If you close your SSH terminal, the `./run.sh` processes will terminate. To keep them running persistently:
+---
 
-**Using `nohup`:**
+## Microsoft Azure VM Deployment Guide (Ubuntu 22.04 / 24.04 LTS)
+
+> **Important Browser Requirement (`HTTPS`):** Modern browsers block camera and microphone access (`navigator.mediaDevices.getUserMedia`) on plain `http://<PUBLIC_IP>` URLs (only `localhost` and `https://` are allowed). Follow Step 5 below to get free automatic HTTPS on your Azure VM using Azure's built-in DNS name + **Caddy** in under 2 minutes.
+
+### 1. Configure Azure VM Networking (NSG Inbound Port Rules)
+In the **Azure Portal** → your **Virtual Machine** → **Networking** → **Network settings**:
+1. Add Inbound Port Rules allowing TCP ports **`22`** (SSH), **`80`** (HTTP / ACME challenge), and **`443`** (HTTPS + WSS). *(Also allow `8000` / `3000` only if testing via plain HTTP + SSH tunnel).*
+2. Click your VM's **Public IP address** → **Configuration** → set a **DNS name label** (e.g., `meetsense-demo`), which gives you a free domain like:
+   `meetsense-demo.<region>.cloudapp.azure.com`
+
+### 2. Install System Packages (Node.js 20 LTS, Python & Headless OpenCV Libs)
+SSH into your Azure Ubuntu VM and run:
 ```bash
-nohup ./run.sh > meetsense.log 2>&1 &
+sudo apt update && sudo apt upgrade -y
+sudo apt install -y python3 python3-pip python3-venv git curl libglib2.0-0 libgomp1
+
+# Install Node.js 20 LTS
+curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
+sudo apt install -y nodejs
 ```
 
-**Using `pm2` (Recommended for Node & Python apps):**
+### 3. Clone Project, Configure `.env` & Build Production Frontend
+FastAPI automatically serves `frontend/build` when built, so you only need **one lightweight backend service** in production (works even on 1 GB RAM VMs; add a 2 GB swapfile first if building on a `B1s` 1 GB VM):
 ```bash
-# Install pm2 globally
-sudo npm i -g pm2
+git clone https://github.com/FASTANDEXTREME/MeetSense-AI.git
+cd MeetSense-AI
 
-# Start Backend
-pm2 start "venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8000" --name "meetsense-backend"
+cp .env.example .env
+nano .env   # Paste your GROQ_API_KEY
 
-# Start Frontend
+# Install backend dependencies
+python3 -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+
+# Build optimized React production bundle
 cd frontend
-pm2 start "npm start" --name "meetsense-frontend"
-
-# Save pm2 list to restart on VM reboot
-pm2 save
-pm2 startup
+npm install --legacy-peer-deps
+npm run build
+cd ..
 ```
 
----
+### 4. Run MeetSenseAI as a Persistent `systemd` Service
+Create `/etc/systemd/system/meetsense.service` (replace `<YOUR_VM_USER>` with your Linux username, e.g. `azureuser`):
+```bash
+sudo tee /etc/systemd/system/meetsense.service > /dev/null << 'EOF'
+[Unit]
+Description=MeetSenseAI FastAPI + React Production Server
+After=network.target
 
-## Accessing the App
+[Service]
+User=azureuser
+WorkingDirectory=/home/azureuser/MeetSense-AI
+EnvironmentFile=/home/azureuser/MeetSense-AI/.env
+ExecStart=/home/azureuser/MeetSense-AI/venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000
+Restart=always
+RestartSec=3
 
-Once running, navigate to the frontend URL via a web browser on your *local* machine (not the VM):
-```text
-http://<YOUR_VM_PUBLIC_IP_OR_DOMAIN>:3000
+[Install]
+WantedBy=multi-user.target
+EOF
+
+sudo systemctl daemon-reload
+sudo systemctl enable --now meetsense
+sudo systemctl status meetsense
 ```
-*(Ensure that ports `3000` and `8000` are open in your server's security group/ufw firewall rules!)*
 
----
+### 5. Enable Automatic Free HTTPS + `wss://` with Caddy
+Install Caddy and point your Azure VM's DNS name to `127.0.0.1:8000`:
+```bash
+sudo apt install -y debian-keyring debian-archive-keyring apt-transport-https
+curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | sudo gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
+curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' | sudo tee /etc/apt/sources.list.d/caddy-stable.list
+sudo apt update && sudo apt install -y caddy
 
-## 🛑 Troubleshooting
+sudo tee /etc/caddy/Caddyfile > /dev/null << 'EOF'
+meetsense-demo.<region>.cloudapp.azure.com {
+    reverse_proxy 127.0.0.1:8000
+}
+EOF
 
-- **WebSocket Connection Fails (`ws://` error in browser console):**
-  - Ensure the backend is successfully running on port `8000`.
-  - Ensure your VM's firewall permits inbound TCP traffic on port `8000`.
-- **OpenCV/Import Errors:**
-  - The project intentionally uses `opencv-python-headless`. If you install `opencv-python` instead, you may encounter missing `libGL.so.1` or X11 errors on a headless server. Stick to `requirement.txt`.
-- **Camera/Mic not working on Frontend:**
-  - Modern web browsers block `getUserMedia` (camera/mic) over standard HTTP unless hosted on `localhost`. To access the site remotely (via your VM's IP), you *must* secure the frontend domain with an SSL Certificate (`HTTPS`) or use an SSH Port Forward tunnel for local testing.
-  - **SSH Tunnel Example (to spoof localhost):** 
-    Run this on your *local computer* to access the VM safely:
-    ```bash
-    ssh -L 3000:localhost:3000 -L 8000:localhost:8000 user@vm-ip
-    ```
-    Then visit `http://localhost:3000` locally.
+sudo systemctl reload caddy
+```
+
+Now anyone can open **`https://meetsense-demo.<region>.cloudapp.azure.com`** from any device — HTTPS, camera/mic permissions, WebRTC signaling (`wss://`), live transcription, facial engagement, and Groq AI summaries all work over port `443`.
+
+### Optional: TURN Server for Strict Firewalls
+WebRTC streams audio/video peer-to-peer using Google STUN servers by default. If participants are behind strict corporate Symmetric NATs, set `REACT_APP_TURN_URL`, `REACT_APP_TURN_USERNAME`, and `REACT_APP_TURN_CREDENTIAL` before running `npm run build`.

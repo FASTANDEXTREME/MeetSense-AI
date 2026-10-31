@@ -1,127 +1,150 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, useCallback } from "react";
+import { buildWsUrl } from "../utils/wsUrl";
 
-export default function useVisionAgent(roomId, clientId) {
+const MAX_RECONNECT_ATTEMPTS = 8;
+const BASE_RECONNECT_DELAY_MS = 1000;
+const CAPTURE_INTERVAL_MS = 2000;
+
+export default function useVisionAgent(roomId, clientId, externalVideoRef = null) {
   const [engagement, setEngagement] = useState(0);
   const [faceDetected, setFaceDetected] = useState(false);
+  const [lookingForward, setLookingForward] = useState(false);
   const [confidence, setConfidence] = useState(0);
   const [connected, setConnected] = useState(false);
+  const [visionEnabled, setVisionEnabled] = useState(true);
 
   const wsRef = useRef(null);
-  const videoRef = useRef(null);
-  const intervalRef = useRef(null);
-  const cameraActiveRef = useRef(false);
+  const internalVideoRef = useRef(null);
+  const activeVideoRef = externalVideoRef || internalVideoRef;
+
+  const unmountedRef = useRef(false);
+  const connectDelayRef = useRef(null);
+  const reconnectTimerRef = useRef(null);
+  const reconnectAttemptRef = useRef(0);
+  const connectRef = useRef(null);
+
+  const scheduleReconnect = useCallback(() => {
+    if (reconnectAttemptRef.current >= MAX_RECONNECT_ATTEMPTS) {
+      return;
+    }
+    const delay = BASE_RECONNECT_DELAY_MS * Math.pow(2, reconnectAttemptRef.current);
+    reconnectTimerRef.current = setTimeout(() => {
+      reconnectAttemptRef.current += 1;
+      connectRef.current?.();
+    }, delay);
+  }, []);
+
+  const connectWebSocket = useCallback(() => {
+    if (!roomId || !clientId || unmountedRef.current) return;
+
+    connectDelayRef.current = setTimeout(() => {
+      if (unmountedRef.current) return;
+
+      const url = buildWsUrl(
+        `/ws/vision/${encodeURIComponent(roomId)}/${encodeURIComponent(clientId)}`
+      );
+      const ws = new WebSocket(url);
+      wsRef.current = ws;
+
+      ws.onopen = () => {
+        setConnected(true);
+        reconnectAttemptRef.current = 0;
+      };
+
+      ws.onclose = () => {
+        setConnected(false);
+        if (!unmountedRef.current) {
+          scheduleReconnect();
+        }
+      };
+
+      ws.onerror = (err) => {
+        console.error("Vision WebSocket error:", err);
+      };
+
+      ws.onmessage = (event) => {
+        let data;
+        try {
+          data = JSON.parse(event.data);
+        } catch {
+          return;
+        }
+
+        if (data.type === "vision") {
+          setEngagement(data.engagement_score ?? 0);
+          setFaceDetected(Boolean(data.face_detected));
+          setLookingForward(Boolean(data.looking_forward));
+          setConfidence(data.confidence ?? 0);
+        }
+      };
+    }, 100);
+  }, [roomId, clientId, scheduleReconnect]);
 
   useEffect(() => {
-    if (!roomId || !clientId) return;
+    connectRef.current = connectWebSocket;
+  }, [connectWebSocket]);
 
-    const wsHost = window.location.hostname || "localhost";
-    wsRef.current = new WebSocket(
-      `ws://${wsHost}:8000/ws/vision/${roomId}/${clientId}`
-    );
-
-    wsRef.current.onopen = () => {
-      console.log("Vision WS connected");
-      setConnected(true);
-    };
-
-    wsRef.current.onclose = () => {
-      console.log("Vision WS disconnected");
-      setConnected(false);
-    };
-
-    wsRef.current.onmessage = (event) => {
-      let data;
-      try {
-        data = JSON.parse(event.data);
-      } catch {
-        return;
-      }
-
-      if (data.type === "vision") {
-        setEngagement(data.engagement_score);
-        setFaceDetected(data.face_detected);
-        setConfidence(data.confidence);
-      }
-    };
+  useEffect(() => {
+    unmountedRef.current = false;
+    connectWebSocket();
 
     return () => {
+      unmountedRef.current = true;
+      clearTimeout(connectDelayRef.current);
+      clearTimeout(reconnectTimerRef.current);
       if (wsRef.current) {
         wsRef.current.close();
         wsRef.current = null;
       }
     };
-  }, [roomId, clientId]);
+  }, [connectWebSocket]);
 
-  const startCamera = async () => {
-    // Guard against duplicate calls
-    if (cameraActiveRef.current) {
-      console.log("Camera already active.");
-      return;
-    }
+  // Periodically sample frames from the shared WebRTC video element
+  useEffect(() => {
+    if (!visionEnabled || !connected) return;
+    if (typeof document === "undefined") return;
 
-    try {
-      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-        throw new Error("getUserMedia is not supported or blocked by browser over HTTP.");
+    const canvas = document.createElement("canvas");
+    canvas.width = 320;
+    canvas.height = 240;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+
+    const intervalId = setInterval(() => {
+      const videoEl = activeVideoRef.current;
+      const ws = wsRef.current;
+
+      if (
+        !videoEl ||
+        !ws ||
+        ws.readyState !== WebSocket.OPEN ||
+        videoEl.readyState < 2 ||
+        videoEl.videoWidth === 0 ||
+        videoEl.videoHeight === 0
+      ) {
+        return;
       }
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: true,
-      });
 
-      cameraActiveRef.current = true;
+      ctx.drawImage(videoEl, 0, 0, canvas.width, canvas.height);
+      const imageData = canvas.toDataURL("image/jpeg", 0.7);
+      ws.send(imageData);
+    }, CAPTURE_INTERVAL_MS);
 
-      if (videoRef.current) {
-        videoRef.current.srcObject = stream;
-        await videoRef.current.play();
-      }
+    return () => clearInterval(intervalId);
+  }, [visionEnabled, connected, activeVideoRef]);
 
-      const canvas = document.createElement("canvas");
-      const ctx = canvas.getContext("2d");
-
-      intervalRef.current = setInterval(() => {
-        if (!videoRef.current || !wsRef.current) return;
-
-        canvas.width = videoRef.current.videoWidth;
-        canvas.height = videoRef.current.videoHeight;
-
-        if (canvas.width === 0 || canvas.height === 0) return;
-
-        ctx.drawImage(videoRef.current, 0, 0);
-
-        const imageData = canvas.toDataURL("image/jpeg");
-
-        if (wsRef.current.readyState === WebSocket.OPEN) {
-          wsRef.current.send(imageData);
-        }
-      }, 1000);
-    } catch (error) {
-      console.error("Camera error:", error);
-      cameraActiveRef.current = false;
-    }
-  };
-
-  const stopCamera = () => {
-    cameraActiveRef.current = false;
-
-    if (intervalRef.current) {
-      clearInterval(intervalRef.current);
-      intervalRef.current = null;
-    }
-
-    if (videoRef.current && videoRef.current.srcObject) {
-      videoRef.current.srcObject
-        .getTracks()
-        .forEach((track) => track.stop());
-      videoRef.current.srcObject = null;
-    }
-  };
+  const toggleVision = useCallback(() => {
+    setVisionEnabled((prev) => !prev);
+  }, []);
 
   return {
     engagement,
     faceDetected,
+    lookingForward,
     confidence,
     connected,
-    startCamera,
-    stopCamera,
-    videoRef,
+    visionEnabled,
+    toggleVision,
+    videoRef: activeVideoRef,
   };
 }

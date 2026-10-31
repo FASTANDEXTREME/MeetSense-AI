@@ -1,31 +1,45 @@
 import { useEffect, useRef, useState, useCallback } from "react";
+import { buildWsUrl } from "../utils/wsUrl";
 
 const MAX_RECONNECT_ATTEMPTS = 10;
 const BASE_RECONNECT_DELAY_MS = 1000;
+
+/**
+ * Strip punctuation and normalize case/whitespace so "hello" and "Hello."
+ * or "i am fine i am fine" and "I am fine. I am fine." match cleanly.
+ */
+function normalizeSpeech(str) {
+  return (str || "")
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}\s]/gu, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
 
 export default function useTranscript(roomId, name) {
 
   const [transcript, setTranscript] = useState([]);
   const [summary, setSummary] = useState(null);
-  const [activeSpeaker, setActiveSpeaker] = useState(null);
+  const [activeSpeakers, setActiveSpeakers] = useState([]);
   const [talkTime, setTalkTime] = useState({});
   const [socketReady, setSocketReady] = useState(false);
+  const [isRecording, setIsRecording] = useState(false);
+  const [speechError, setSpeechError] = useState("");
 
   const socketRef = useRef(null);
   const recognitionRef = useRef(null);
+  const mediaRecorderRef = useRef(null);
+  const recorderStreamRef = useRef(null);
+  const recorderTimerRef = useRef(null);
+  const usingFallbackRef = useRef(false);
   const isRecordingRef = useRef(false);
   const reconnectAttemptRef = useRef(0);
   const reconnectTimerRef = useRef(null);
   const unmountedRef = useRef(false);
   const connectRef = useRef(null);
   const networkErrorCountRef = useRef(0);
-  const MAX_NETWORK_ERRORS = 5;
 
   // ── FIX #3: rAF-batched transcript buffer ─────────────────────────
-  // Instead of calling setTranscript() on every single WebSocket echo,
-  // we buffer incoming transcript messages and flush them in a single
-  // state update per animation frame (~16ms). This prevents React from
-  // re-rendering 20+ times per second when interim results are rapid.
   const transcriptBufferRef = useRef([]);
   const rafIdRef = useRef(null);
 
@@ -37,40 +51,59 @@ export default function useTranscript(roomId, name) {
     transcriptBufferRef.current = [];
 
     setTranscript(prev => {
-      // We use a copy-on-write pattern: `updated` stays === `prev`
-      // until we actually need to modify, avoiding unnecessary copies.
       let updated = prev;
 
       for (const entry of batch) {
+        const entryIsFinal = entry.is_final !== false;
         const last = updated.length > 0 ? updated[updated.length - 1] : null;
 
-        // Client-side dedup: mirrors backend's is_near_duplicate logic.
-        // If the last entry is from the same speaker and one text is a
-        // substring of the other, replace in-place instead of appending.
         if (last && last.speaker === entry.speaker) {
-          const lastText = last.text.trim();
-          const newText = entry.text.trim();
-
-          if (newText.includes(lastText) || lastText.includes(newText)) {
+          // 1. If the previous line from this speaker was an unfinished interim
+          //    result, always replace it in-place with the latest interim/final update!
+          if (last.is_final === false) {
             if (updated === prev) updated = [...prev];
             updated[updated.length - 1] = {
-              ...last,
-              text: newText.length >= lastText.length ? newText : lastText,
+              speaker: entry.speaker,
+              text: entry.text.trim(),
+              is_final: entryIsFinal,
+            };
+            continue;
+          }
+
+          // 2. Punctuation- & case-insensitive dedup (e.g. "hello" vs "Hello.")
+          const normLast = normalizeSpeech(last.text);
+          const normNew = normalizeSpeech(entry.text);
+
+          if (
+            normLast &&
+            normNew &&
+            (normNew.includes(normLast) || normLast.includes(normNew))
+          ) {
+            if (updated === prev) updated = [...prev];
+            const preferNew =
+              entryIsFinal || normNew.length >= normLast.length;
+            updated[updated.length - 1] = {
+              speaker: entry.speaker,
+              text: preferNew ? entry.text.trim() : last.text,
+              is_final: last.is_final || entryIsFinal,
             };
             continue;
           }
         }
 
-        // Genuinely new content or different speaker → append
+        // Genuinely new utterance or different speaker → append
         if (updated === prev) updated = [...prev];
-        updated.push(entry);
+        updated.push({
+          speaker: entry.speaker,
+          text: entry.text.trim(),
+          is_final: entryIsFinal,
+        });
       }
 
       return updated;
     });
   }, []);
 
-  // Store connect function in ref to break circular dependency
   const scheduleReconnect = useCallback(() => {
     if (reconnectAttemptRef.current >= MAX_RECONNECT_ATTEMPTS) {
       console.warn("Max transcript WS reconnect attempts reached.");
@@ -78,8 +111,6 @@ export default function useTranscript(roomId, name) {
     }
 
     const delay = BASE_RECONNECT_DELAY_MS * Math.pow(2, reconnectAttemptRef.current);
-    console.log(`Reconnecting transcript WS in ${delay}ms (attempt ${reconnectAttemptRef.current + 1})...`);
-
     reconnectTimerRef.current = setTimeout(() => {
       reconnectAttemptRef.current += 1;
       connectRef.current?.();
@@ -89,19 +120,16 @@ export default function useTranscript(roomId, name) {
   const connectDelayRef = useRef(null);
 
   const connectWebSocket = useCallback(() => {
-    if (unmountedRef.current) return;
+    if (unmountedRef.current || !roomId) return;
 
-    // Delay connection slightly so React Strict Mode's immediate
-    // unmount can cancel the timer before the socket is ever created.
     connectDelayRef.current = setTimeout(() => {
       if (unmountedRef.current) return;
 
-      const wsHost = window.location.hostname || "localhost";
-      const ws = new WebSocket(`ws://${wsHost}:8000/ws/${roomId}`);
+      const wsUrl = buildWsUrl(`/ws/${encodeURIComponent(roomId)}`);
+      const ws = new WebSocket(wsUrl);
       socketRef.current = ws;
 
       ws.onopen = () => {
-        console.log("Transcript WebSocket connected");
         setSocketReady(true);
         reconnectAttemptRef.current = 0;
       };
@@ -125,7 +153,6 @@ export default function useTranscript(roomId, name) {
           return;
         }
 
-        // FIX #3: Buffer transcript messages, flush once per frame
         if (data.type === "transcript") {
           transcriptBufferRef.current.push(data);
           if (!rafIdRef.current) {
@@ -139,11 +166,23 @@ export default function useTranscript(roomId, name) {
         }
 
         if (data.type === "speaking") {
-          setActiveSpeaker(data.speaker);
+          if (Array.isArray(data.active_speakers)) {
+            setActiveSpeakers(data.active_speakers);
+          } else if (data.speaker) {
+            setActiveSpeakers(prev =>
+              prev.includes(data.speaker) ? prev : [...prev, data.speaker]
+            );
+          }
         }
 
         if (data.type === "stopped_speaking") {
-          setActiveSpeaker(null);
+          if (Array.isArray(data.active_speakers)) {
+            setActiveSpeakers(data.active_speakers);
+          } else if (data.speaker) {
+            setActiveSpeakers(prev => prev.filter(s => s !== data.speaker));
+          } else {
+            setActiveSpeakers([]);
+          }
         }
 
         if (data.type === "talk_time") {
@@ -153,10 +192,27 @@ export default function useTranscript(roomId, name) {
     }, 100);
   }, [roomId, scheduleReconnect, flushTranscript]);
 
-  // Keep connectRef in sync
   useEffect(() => {
     connectRef.current = connectWebSocket;
   }, [connectWebSocket]);
+
+  const cleanupFallbackRecorder = useCallback(() => {
+    usingFallbackRef.current = false;
+    clearInterval(recorderTimerRef.current);
+    recorderTimerRef.current = null;
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state !== "inactive") {
+      try {
+        mediaRecorderRef.current.stop();
+      } catch {
+        // ignore
+      }
+    }
+    mediaRecorderRef.current = null;
+    if (recorderStreamRef.current) {
+      recorderStreamRef.current.getTracks().forEach(t => t.stop());
+      recorderStreamRef.current = null;
+    }
+  }, []);
 
   useEffect(() => {
     unmountedRef.current = false;
@@ -164,15 +220,17 @@ export default function useTranscript(roomId, name) {
 
     return () => {
       unmountedRef.current = true;
+      isRecordingRef.current = false;
+      recognitionRef.current?.stop();
+      recognitionRef.current = null;
+      cleanupFallbackRecorder();
       clearTimeout(connectDelayRef.current);
       clearTimeout(reconnectTimerRef.current);
       cancelAnimationFrame(rafIdRef.current);
       socketRef.current?.close();
     };
-  }, [connectWebSocket]);
+  }, [connectWebSocket, cleanupFallbackRecorder]);
 
-
-  // Safe send — stable ref, no deps (reads socketRef.current at call time)
   const safeSend = useCallback((payload) => {
     const ws = socketRef.current;
     if (ws && ws.readyState === WebSocket.OPEN) {
@@ -180,66 +238,140 @@ export default function useTranscript(roomId, name) {
     }
   }, []);
 
+  /**
+   * Universal fallback for Brave / Firefox / Safari where window.SpeechRecognition
+   * is either missing or blocked (Brave blocks Google's proprietary speech servers).
+   * Streams short WebM/Opus chunks to the backend Groq Whisper endpoint.
+   */
+  const startServerWhisperFallback = useCallback(async () => {
+    if (usingFallbackRef.current || !isRecordingRef.current) return;
+    usingFallbackRef.current = true;
+
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      if (!isRecordingRef.current) {
+        stream.getTracks().forEach(t => t.stop());
+        return;
+      }
+
+      recorderStreamRef.current = stream;
+      const mimeType = MediaRecorder.isTypeSupported("audio/webm;codecs=opus")
+        ? "audio/webm;codecs=opus"
+        : "audio/webm";
+
+      const recordSegment = () => {
+        if (!isRecordingRef.current || !recorderStreamRef.current) return;
+        const recorder = new MediaRecorder(recorderStreamRef.current, { mimeType });
+        mediaRecorderRef.current = recorder;
+        const chunks = [];
+
+        recorder.ondataavailable = (e) => {
+          if (e.data && e.data.size > 0) chunks.push(e.data);
+        };
+
+        recorder.onstop = () => {
+          if (chunks.length === 0) return;
+          const blob = new Blob(chunks, { type: mimeType });
+          if (blob.size < 1200) return; // skip empty silence headers
+
+          const reader = new FileReader();
+          reader.onloadend = () => {
+            if (typeof reader.result === "string") {
+              safeSend({
+                type: "audio_chunk",
+                speaker: name,
+                audio: reader.result,
+              });
+            }
+          };
+          reader.readAsDataURL(blob);
+        };
+
+        recorder.start();
+      };
+
+      setSpeechError("");
+      recordSegment();
+
+      // Flush complete self-contained 3.5s WebM files so every chunk has valid headers
+      recorderTimerRef.current = setInterval(() => {
+        if (!isRecordingRef.current) return;
+        if (mediaRecorderRef.current && mediaRecorderRef.current.state === "recording") {
+          mediaRecorderRef.current.stop();
+        }
+        recordSegment();
+      }, 3500);
+    } catch (err) {
+      console.error("Audio fallback error:", err);
+      isRecordingRef.current = false;
+      setIsRecording(false);
+      usingFallbackRef.current = false;
+      setSpeechError("Could not access microphone for transcription.");
+    }
+  }, [name, safeSend]);
 
   const startMic = () => {
-
     if (!socketReady) {
-      alert("WebSocket not connected yet. Please wait.");
+      setSpeechError("Transcript WebSocket is still connecting. Please wait a moment.");
       return;
     }
 
     if (isRecordingRef.current) {
-      return; // Already recording
+      return;
     }
+
+    setSpeechError("");
+    isRecordingRef.current = true;
+    setIsRecording(true);
+    networkErrorCountRef.current = 0;
+
+    safeSend({
+      type: "speaking",
+      speaker: name,
+    });
 
     const SpeechRecognition =
       window.SpeechRecognition || window.webkitSpeechRecognition;
 
+    // Browsers without Web Speech API (e.g. Firefox) → use Groq Whisper fallback immediately
     if (!SpeechRecognition) {
-      alert("Speech Recognition is not supported by your browser.");
+      startServerWhisperFallback();
       return;
     }
 
     recognitionRef.current = new SpeechRecognition();
     recognitionRef.current.continuous = true;
-    recognitionRef.current.interimResults = true; // FIX #1: real-time word-by-word
+    recognitionRef.current.interimResults = true;
 
-    isRecordingRef.current = true;
-    networkErrorCountRef.current = 0;
-
-    // ── Error handler ───────────────────────────────────────────────
     recognitionRef.current.onerror = (event) => {
-      // Fatal: user denied mic permission
-      if (event.error === 'not-allowed' || event.error === 'service-not-allowed') {
-        console.error("Speech Recognition Error:", event.error);
+      if (event.error === "not-allowed" || event.error === "service-not-allowed") {
         isRecordingRef.current = false;
+        setIsRecording(false);
+        setSpeechError("Microphone permission was denied.");
         return;
       }
 
-      // Transient: network hiccup — count toward MAX_NETWORK_ERRORS
-      if (event.error === 'network') {
+      // Brave blocks Google's speech backend and immediately throws "network".
+      // Automatically switch to our backend Groq Whisper transcription!
+      if (event.error === "network") {
         networkErrorCountRef.current += 1;
-        if (networkErrorCountRef.current >= MAX_NETWORK_ERRORS) {
-          console.warn(`Speech recognition stopped after ${MAX_NETWORK_ERRORS} consecutive network errors.`);
-          isRecordingRef.current = false;
-          alert("Speech recognition lost connection. Please check your internet and try again.");
+        if (networkErrorCountRef.current >= 1) {
+          console.info("Browser SpeechRecognition blocked (e.g. Brave) — switching to Groq Whisper fallback.");
+          try {
+            recognitionRef.current?.stop();
+          } catch {
+            // ignore
+          }
+          recognitionRef.current = null;
+          startServerWhisperFallback();
           return;
         }
-        console.warn(`Network error (${networkErrorCountRef.current}/${MAX_NETWORK_ERRORS})`);
-        return;
       }
 
-      // Fast restarts can cause 'aborted' — harmless, ignore it
-      if (event.error === 'aborted') return;
-
+      if (event.error === "aborted") return;
       console.error("Speech Recognition Error:", event.error);
     };
 
-    // ── Result handler ──────────────────────────────────────────────
-    // FIX #1: Process BOTH interim and final results. The backend's
-    // is_near_duplicate() handles the rapid overlapping updates, so
-    // it's safe to send every interim. This makes transcription feel
-    // instant instead of waiting for full-sentence finalization.
     recognitionRef.current.onresult = (event) => {
       for (let i = event.resultIndex; i < event.results.length; i++) {
         const result = event.results[i];
@@ -247,37 +379,32 @@ export default function useTranscript(roomId, name) {
         if (!text) continue;
 
         if (result.isFinal) {
-          // Successful final → healthy connection, reset error count
           networkErrorCountRef.current = 0;
         }
 
-        // Send both interim and final — payload stays { speaker, text }
-        safeSend({ speaker: name, text });
+        safeSend({
+          speaker: name,
+          text,
+          is_final: Boolean(result.isFinal),
+        });
       }
     };
 
-    // ── End handler (auto-restart) ──────────────────────────────────
-    // FIX #2: The "deaf gap". The browser fires onend after pauses,
-    // silence timeouts, or transient errors. We restart IMMEDIATELY
-    // (0ms) when healthy, keeping the mic hot at all times. Backoff
-    // only kicks in when there are actual consecutive network errors.
     recognitionRef.current.onend = () => {
-      if (!isRecordingRef.current) return;
+      if (!isRecordingRef.current || usingFallbackRef.current) return;
 
-      // Healthy: 0ms. Network errors: 100ms → 200ms → 400ms → … → 3200ms cap
       const delay = networkErrorCountRef.current > 0
         ? Math.min(100 * Math.pow(2, networkErrorCountRef.current - 1), 3200)
         : 0;
 
       const doRestart = () => {
-        if (!isRecordingRef.current) return;
+        if (!isRecordingRef.current || usingFallbackRef.current || !recognitionRef.current) return;
         try {
-          recognitionRef.current?.start();
-        } catch (e) {
-          // "already started" race — wait one tick and retry once
+          recognitionRef.current.start();
+        } catch {
           setTimeout(() => {
-            if (!isRecordingRef.current) return;
-            try { recognitionRef.current?.start(); } catch { /* give up */ }
+            if (!isRecordingRef.current || usingFallbackRef.current || !recognitionRef.current) return;
+            try { recognitionRef.current.start(); } catch { /* give up */ }
           }, 50);
         }
       };
@@ -289,28 +416,27 @@ export default function useTranscript(roomId, name) {
       }
     };
 
-    safeSend({
-      type: "speaking",
-      speaker: name
-    });
-
     recognitionRef.current.start();
   };
 
-
   const stopMic = () => {
     isRecordingRef.current = false;
+    setIsRecording(false);
     safeSend({
       type: "stopped_speaking",
-      speaker: name
+      speaker: name,
     });
     recognitionRef.current?.stop();
     recognitionRef.current = null;
+    cleanupFallbackRecorder();
   };
 
   const requestSummary = () => {
     safeSend({ type: "request_summary" });
   };
+
+  const activeSpeaker =
+    activeSpeakers.length > 0 ? activeSpeakers[activeSpeakers.length - 1] : null;
 
   return {
     transcript,
@@ -319,7 +445,10 @@ export default function useTranscript(roomId, name) {
     stopMic,
     requestSummary,
     activeSpeaker,
+    activeSpeakers,
     talkTime,
-    socketReady
+    socketReady,
+    isRecording,
+    speechError,
   };
 }

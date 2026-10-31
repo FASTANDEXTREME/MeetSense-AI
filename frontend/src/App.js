@@ -9,6 +9,10 @@ function App() {
     setRoomData({ roomId, name });
   };
 
+  const handleLeave = () => {
+    setRoomData(null);
+  };
+
   if (!roomData) {
     return <JoinPage onJoin={handleJoin} />;
   }
@@ -17,6 +21,7 @@ function App() {
     <MeetingRoom
       roomId={roomData.roomId}
       name={roomData.name}
+      onLeave={handleLeave}
     />
   );
 }
